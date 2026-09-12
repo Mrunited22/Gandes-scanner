@@ -3,11 +3,11 @@ import { Buffer } from 'buffer';
 global.Buffer = global.Buffer || Buffer;
 
 /**
- * Gandes Scanner v1.1.0
- * Modern Document Scanner - Offline First
- * - Auto edge detection via react-native-document-scanner-plugin
- * - Data integrity: pages === pageImages.length
- * - Persistent storage: file disimpan di documentDirectory (bukan cache)
+ * Gandes Scanner v1.2.0
+ * - PDF generated via pdf-lib (bukan expo-print HTML)
+ * - Splash screen native
+ * - Document picker untuk impor PDF & gambar
+ * - Optimasi performa FlatList
  */
 
 import React, {
@@ -36,23 +36,29 @@ import {
   Dimensions,
   Platform,
   Alert,
+  Linking,
+  InteractionManager,
 } from 'react-native';
 
 import { StatusBar } from 'expo-status-bar';
 import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
+import * as SplashScreen from 'expo-splash-screen';
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as FileSystem from 'expo-file-system/legacy';
-import * as Print from 'expo-print';
 import * as Sharing from 'expo-sharing';
 import * as ImagePicker from 'expo-image-picker';
 import * as ImageManipulator from 'expo-image-manipulator';
+import * as DocumentPicker from 'expo-document-picker';
 import * as LocalAuthentication from 'expo-local-authentication';
 import * as Haptics from 'expo-haptics';
 import DocumentScanner from 'react-native-document-scanner-plugin';
 import { PDFDocument, rgb, StandardFonts, degrees } from 'pdf-lib';
+
+// Jaga splash tetap tampil sampai kita siap
+SplashScreen.preventAutoHideAsync().catch(() => {});
 
 const { width: SCREEN_W } = Dimensions.get('window');
 
@@ -104,7 +110,6 @@ const COLORS = {
   },
 };
 
-// Folder pakai ID stabil, bukan name (fix B3)
 const DEFAULT_FOLDERS = [
   { id: 'f1', name: 'Invoice', color: '#00f2fe', glyph: 'INV' },
   { id: 'f2', name: 'Identitas', color: '#10b981', glyph: 'ID' },
@@ -114,9 +119,9 @@ const DEFAULT_FOLDERS = [
 ];
 
 const QUALITY_PRESETS = [
-  { key: 'ultra', label: 'Ultra HD', badge: '4K', dpi: 400, res: 4000, tag: 'PRO', desc: 'Arsip & cetak ulang' },
-  { key: 'hd', label: 'HD', badge: 'HD', dpi: 300, res: 2500, tag: 'REC', desc: 'Standar scan profesional' },
-  { key: 'medium', label: 'Medium', badge: 'MD', dpi: 200, res: 1600, tag: '', desc: 'Share via chat & email' },
+  { key: 'ultra', label: 'Ultra HD', badge: '4K', dpi: 400, res: 3000, tag: 'PRO', desc: 'Arsip & cetak ulang' },
+  { key: 'hd', label: 'HD', badge: 'HD', dpi: 300, res: 2000, tag: 'REC', desc: 'Standar scan profesional' },
+  { key: 'medium', label: 'Medium', badge: 'MD', dpi: 200, res: 1400, tag: '', desc: 'Share via chat & email' },
   { key: 'compact', label: 'Compact', badge: 'LT', dpi: 150, res: 1000, tag: '', desc: 'Hemat storage' },
 ];
 
@@ -130,8 +135,6 @@ const CONVERT_FORMATS = [
   { key: 'jpg', label: 'JPG', desc: 'Dari page image', color: '#f59e0b' },
   { key: 'png', label: 'PNG', desc: 'Dari page image', color: '#8b5cf6' },
 ];
-
-const ANNO_COLORS = ['#00f2fe', '#f59e0b', '#10b981', '#ef4444', '#8b5cf6', '#111827'];
 
 /* ============================================================
    UTILITIES
@@ -155,13 +158,10 @@ export const haptic = async (style = 'light') => {
   } catch (e) {}
 };
 
-// Fix B5: escape HTML
-const escapeHtml = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-
-// Fix B1: copy file dari cache ke documentDirectory
 const persistImage = async (srcUri, prefix = 'img') => {
-  const ext = srcUri.split('.').pop()?.split('?')[0] || 'jpg';
-  const filename = `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.${ext}`;
+  const ext = (srcUri.split('.').pop()?.split('?')[0] || 'jpg').toLowerCase();
+  const safeExt = ['jpg', 'jpeg', 'png'].includes(ext) ? ext : 'jpg';
+  const filename = `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.${safeExt}`;
   const dest = `${FileSystem.documentDirectory}${filename}`;
   await FileSystem.copyAsync({ from: srcUri, to: dest });
   return dest;
@@ -175,7 +175,7 @@ const persistPdf = async (srcUri, prefix = 'pdf') => {
 };
 
 /* ============================================================
-   STORAGE SERVICE
+   STORAGE
    ============================================================ */
 const STORAGE_KEYS = {
   DOCS: '@gandes:documents:v2',
@@ -201,48 +201,99 @@ const Storage = {
 };
 
 /* ============================================================
-   PDF SERVICE
+   PDF SERVICE — Semua pakai pdf-lib
    ============================================================ */
-const buildPageHTML = (imageUri) => `
-  <div style="page-break-after: always; width:100%; height:100%; display:flex; align-items:center; justify-content:center; padding:0; margin:0;">
-    <img src="${escapeHtml(imageUri)}" style="max-width:100%; max-height:100%; object-fit:contain;" />
-  </div>
-`;
+const A4_W = 595.28;
+const A4_H = 841.89;
+
+const readAsBase64 = async (uri) => {
+  return await FileSystem.readAsStringAsync(uri, { encoding: FileSystem.EncodingType.Base64 });
+};
+
+const embedImageSafe = async (pdfDoc, uri) => {
+  const base64 = await readAsBase64(uri);
+  const bytes = Buffer.from(base64, 'base64');
+  const lower = uri.toLowerCase();
+  if (lower.endsWith('.png')) {
+    return await pdfDoc.embedPng(bytes);
+  }
+  // Default: coba JPG dulu, fallback PNG
+  try {
+    return await pdfDoc.embedJpg(bytes);
+  } catch (e) {
+    return await pdfDoc.embedPng(bytes);
+  }
+};
 
 export const imagesToPdf = async (imageUris, docName = 'document') => {
-  const html = `<!DOCTYPE html><html><head><meta charset="utf-8" /><style>
-    @page { size: A4; margin: 0; }
-    body { margin: 0; padding: 0; }
-    img { display: block; }
-  </style></head><body>${imageUris.map((u) => buildPageHTML(u)).join('')}</body></html>`;
+  const pdfDoc = await PDFDocument.create();
 
-  const { uri } = await Print.printToFileAsync({ html, base64: false });
-  const permanent = await persistPdf(uri, docName);
+  for (let i = 0; i < imageUris.length; i++) {
+    const uri = imageUris[i];
+    try {
+      const image = await embedImageSafe(pdfDoc, uri);
+      const scale = Math.min(A4_W / image.width, A4_H / image.height);
+      const w = image.width * scale;
+      const h = image.height * scale;
+      const x = (A4_W - w) / 2;
+      const y = (A4_H - h) / 2;
+      const page = pdfDoc.addPage([A4_W, A4_H]);
+      page.drawImage(image, { x, y, width: w, height: h });
+    } catch (e) {
+      console.error(`Gagal embed image ${i}:`, e);
+    }
+  }
+
+  const bytes = await pdfDoc.save();
+  const tmp = `${FileSystem.cacheDirectory}pdf_${Date.now()}.pdf`;
+  await FileSystem.writeAsStringAsync(
+    tmp,
+    Buffer.from(bytes).toString('base64'),
+    { encoding: FileSystem.EncodingType.Base64 }
+  );
+  const permanent = await persistPdf(tmp, docName);
   const info = await FileSystem.getInfoAsync(permanent);
   const sizeMB = (info.size || 0) / (1024 * 1024);
-  return { uri: permanent, size: sizeMB, sizeStr: fmtSize(sizeMB), pages: imageUris.length };
+
+  try { await FileSystem.deleteAsync(tmp, { idempotent: true }); } catch (e) {}
+
+  return {
+    uri: permanent,
+    size: sizeMB,
+    sizeStr: fmtSize(sizeMB),
+    pages: pdfDoc.getPageCount(),
+  };
 };
 
 export const mergePdfs = async (pdfFiles, outputName = 'merged') => {
   const mergedPdf = await PDFDocument.create();
   for (const file of pdfFiles) {
-    const pdfBytes = await FileSystem.readAsStringAsync(file.uri, { encoding: FileSystem.EncodingType.Base64 });
-    const srcPdf = await PDFDocument.load(pdfBytes, { ignoreEncryption: true });
-    const copiedPages = await mergedPdf.copyPages(srcPdf, srcPdf.getPageIndices());
-    copiedPages.forEach((p) => mergedPdf.addPage(p));
+    try {
+      const base64 = await readAsBase64(file.uri);
+      const srcPdf = await PDFDocument.load(base64, { ignoreEncryption: true });
+      const copied = await mergedPdf.copyPages(srcPdf, srcPdf.getPageIndices());
+      copied.forEach((p) => mergedPdf.addPage(p));
+    } catch (e) {
+      console.error(`Gagal merge ${file.name}:`, e);
+    }
   }
-  const mergedBytes = await mergedPdf.save();
+  const bytes = await mergedPdf.save();
   const tmp = `${FileSystem.cacheDirectory}merge_${Date.now()}.pdf`;
-  await FileSystem.writeAsStringAsync(tmp, Buffer.from(mergedBytes).toString('base64'), { encoding: FileSystem.EncodingType.Base64 });
+  await FileSystem.writeAsStringAsync(
+    tmp,
+    Buffer.from(bytes).toString('base64'),
+    { encoding: FileSystem.EncodingType.Base64 }
+  );
   const permanent = await persistPdf(tmp, outputName);
   const info = await FileSystem.getInfoAsync(permanent);
   const sizeMB = (info.size || 0) / (1024 * 1024);
+  try { await FileSystem.deleteAsync(tmp, { idempotent: true }); } catch (e) {}
   return { uri: permanent, size: sizeMB, sizeStr: fmtSize(sizeMB), pages: mergedPdf.getPageCount() };
 };
 
 export const splitPdfByRanges = async (sourceUri, ranges = []) => {
-  const pdfBytes = await FileSystem.readAsStringAsync(sourceUri, { encoding: FileSystem.EncodingType.Base64 });
-  const srcPdf = await PDFDocument.load(pdfBytes, { ignoreEncryption: true });
+  const base64 = await readAsBase64(sourceUri);
+  const srcPdf = await PDFDocument.load(base64, { ignoreEncryption: true });
   const totalPages = srcPdf.getPageCount();
   const results = [];
   for (let i = 0; i < ranges.length; i++) {
@@ -260,14 +311,15 @@ export const splitPdfByRanges = async (sourceUri, ranges = []) => {
     await FileSystem.writeAsStringAsync(tmp, Buffer.from(bytes).toString('base64'), { encoding: FileSystem.EncodingType.Base64 });
     const permanent = await persistPdf(tmp, `split_${i + 1}`);
     const info = await FileSystem.getInfoAsync(permanent);
+    try { await FileSystem.deleteAsync(tmp, { idempotent: true }); } catch (e) {}
     results.push({ uri: permanent, pages: safeTo - safeFrom + 1, size: (info.size || 0) / (1024 * 1024) });
   }
   return results;
 };
 
 export const extractPdfPages = async (sourceUri, pageNumbers = []) => {
-  const pdfBytes = await FileSystem.readAsStringAsync(sourceUri, { encoding: FileSystem.EncodingType.Base64 });
-  const srcPdf = await PDFDocument.load(pdfBytes, { ignoreEncryption: true });
+  const base64 = await readAsBase64(sourceUri);
+  const srcPdf = await PDFDocument.load(base64, { ignoreEncryption: true });
   const newPdf = await PDFDocument.create();
   const indices = pageNumbers.map((n) => n - 1).filter((i) => i >= 0 && i < srcPdf.getPageCount());
   const copied = await newPdf.copyPages(srcPdf, indices);
@@ -277,17 +329,16 @@ export const extractPdfPages = async (sourceUri, pageNumbers = []) => {
   await FileSystem.writeAsStringAsync(tmp, Buffer.from(bytes).toString('base64'), { encoding: FileSystem.EncodingType.Base64 });
   const permanent = await persistPdf(tmp, 'extract');
   const info = await FileSystem.getInfoAsync(permanent);
+  try { await FileSystem.deleteAsync(tmp, { idempotent: true }); } catch (e) {}
   return { uri: permanent, pages: copied.length, size: (info.size || 0) / (1024 * 1024) };
 };
 
-// Fix A12: hitung center berdasarkan ukuran font sebenarnya
 export const watermarkPdf = async (sourceUri, text = 'GANDES SCANNER') => {
-  const pdfBytes = await FileSystem.readAsStringAsync(sourceUri, { encoding: FileSystem.EncodingType.Base64 });
-  const pdfDoc = await PDFDocument.load(pdfBytes, { ignoreEncryption: true });
+  const base64 = await readAsBase64(sourceUri);
+  const pdfDoc = await PDFDocument.load(base64, { ignoreEncryption: true });
   const font = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
   const fontSize = 48;
   const pages = pdfDoc.getPages();
-
   pages.forEach((page) => {
     const { width, height } = page.getSize();
     const textWidth = font.widthOfTextAtSize(text, fontSize);
@@ -302,63 +353,71 @@ export const watermarkPdf = async (sourceUri, text = 'GANDES SCANNER') => {
       rotate: degrees(-30),
     });
   });
-
   const bytes = await pdfDoc.save();
   const tmp = `${FileSystem.cacheDirectory}wm_${Date.now()}.pdf`;
   await FileSystem.writeAsStringAsync(tmp, Buffer.from(bytes).toString('base64'), { encoding: FileSystem.EncodingType.Base64 });
   const permanent = await persistPdf(tmp, 'watermarked');
   const info = await FileSystem.getInfoAsync(permanent);
   const sizeMB = (info.size || 0) / (1024 * 1024);
+  try { await FileSystem.deleteAsync(tmp, { idempotent: true }); } catch (e) {}
   return { uri: permanent, size: sizeMB, sizeStr: fmtSize(sizeMB), pages: pdfDoc.getPageCount() };
 };
 
-// Fix A6: honest compress — hapus metadata + object streams (real effect kecil, tapi jujur)
 export const compressPdf = async (sourceUri, level = 'balanced') => {
-  const pdfBytes = await FileSystem.readAsStringAsync(sourceUri, { encoding: FileSystem.EncodingType.Base64 });
-  const srcPdf = await PDFDocument.load(pdfBytes, { ignoreEncryption: true });
+  const base64 = await readAsBase64(sourceUri);
+  const srcPdf = await PDFDocument.load(base64, { ignoreEncryption: true });
   const newPdf = await PDFDocument.create();
-  const copiedPages = await newPdf.copyPages(srcPdf, srcPdf.getPageIndices());
-  copiedPages.forEach((p) => newPdf.addPage(p));
-
-  // Buang semua metadata
+  const copied = await newPdf.copyPages(srcPdf, srcPdf.getPageIndices());
+  copied.forEach((p) => newPdf.addPage(p));
   newPdf.setTitle('');
   newPdf.setAuthor('');
   newPdf.setSubject('');
   newPdf.setKeywords([]);
   newPdf.setProducer('');
   newPdf.setCreator('');
-
   const useStreams = level !== 'light';
-  const bytes = await newPdf.save({ useObjectStreams: useStreams, addDefaultPage: false });
-
+  const bytes = await newPdf.save({ useObjectStreams: useStreams });
   const tmp = `${FileSystem.cacheDirectory}comp_${Date.now()}.pdf`;
   await FileSystem.writeAsStringAsync(tmp, Buffer.from(bytes).toString('base64'), { encoding: FileSystem.EncodingType.Base64 });
   const permanent = await persistPdf(tmp, 'compressed');
   const info = await FileSystem.getInfoAsync(permanent);
   const newSize = (info.size || 0) / (1024 * 1024);
+  try { await FileSystem.deleteAsync(tmp, { idempotent: true }); } catch (e) {}
   return { uri: permanent, size: newSize, sizeStr: fmtSize(newSize), pages: newPdf.getPageCount() };
 };
 
+// Convert page images ke JPG/PNG
+export const convertImages = async (sourceUris, format = 'jpg', namePrefix = 'conv') => {
+  const outputs = [];
+  const targetFormat = format === 'png' ? ImageManipulator.SaveFormat.PNG : ImageManipulator.SaveFormat.JPEG;
+  const ext = format === 'png' ? 'png' : 'jpg';
+  for (let i = 0; i < sourceUris.length; i++) {
+    try {
+      const result = await ImageManipulator.manipulateAsync(sourceUris[i], [], {
+        compress: 0.92,
+        format: targetFormat,
+      });
+      const filename = `${namePrefix}_hal${i + 1}.${ext}`;
+      const dest = `${FileSystem.documentDirectory}${filename}`;
+      await FileSystem.copyAsync({ from: result.uri, to: dest });
+      outputs.push(dest);
+    } catch (e) {
+      console.error('convertImages error:', e);
+    }
+  }
+  return outputs;
+};
+
 /* ============================================================
-   THEME CONTEXT (Fix E1: benar-benar dipakai)
+   THEME CONTEXT
    ============================================================ */
 const ThemeContext = createContext({ colors: COLORS.dark, mode: 'dark' });
 export const useTheme = () => useContext(ThemeContext);
 
 /* ============================================================
-   UI COMPONENTS
+   UI COMPONENTS (memoized)
    ============================================================ */
-export const Card = ({ children, style, onPress, active, colors }) => {
-  const Comp = onPress ? Pressable : View;
-  return (
-    <Comp onPress={onPress} style={[{ backgroundColor: colors.surface, borderWidth: 1, borderColor: active ? colors.cyan : colors.border, borderRadius: 18, padding: 16 }, style]}>
-      {children}
-    </Comp>
-  );
-};
-
-// Fix E9: cegah double-tap
-export const Btn = ({ label, icon, onPress, colors, variant = 'primary', style, disabled }) => {
+export const Btn = React.memo(({ label, icon, onPress, colors, variant = 'primary', style, disabled }) => {
   const [busy, setBusy] = useState(false);
   const variants = {
     primary: { bg: colors.cyan, fg: '#050811' },
@@ -400,22 +459,22 @@ export const Btn = ({ label, icon, onPress, colors, variant = 'primary', style, 
       {label ? <Text style={{ color: v.fg, fontWeight: '700', fontSize: 14 }}>{label}</Text> : null}
     </Pressable>
   );
-};
+});
 
-export const Chip = ({ label, active, onPress, colors, icon }) => (
+export const Chip = React.memo(({ label, active, onPress, colors, icon }) => (
   <Pressable onPress={onPress} style={{ paddingHorizontal: 14, paddingVertical: 7, borderRadius: 999, backgroundColor: active ? 'rgba(0,242,254,0.12)' : colors.surfaceSoft, borderWidth: 1, borderColor: active ? colors.cyan : colors.border, flexDirection: 'row', alignItems: 'center', marginRight: 8 }}>
     {icon ? <Ionicons name={icon} size={12} color={active ? colors.cyan : colors.textMuted} style={{ marginRight: 6 }} /> : null}
     <Text style={{ color: active ? colors.cyan : colors.text, fontWeight: '700', fontSize: 12 }}>{label}</Text>
   </Pressable>
-);
+));
 
-export const IconPill = ({ name, onPress, colors, active }) => (
+export const IconPill = React.memo(({ name, onPress, colors, active }) => (
   <Pressable onPress={onPress} style={{ width: 40, height: 40, borderRadius: 12, backgroundColor: active ? colors.cyan : colors.surface, borderWidth: 1, borderColor: active ? colors.cyan : colors.border, alignItems: 'center', justifyContent: 'center' }}>
     <Ionicons name={name} size={18} color={active ? '#050811' : colors.text} />
   </Pressable>
-);
+));
 
-export const Header = ({ title, subtitle, onBack, colors, right }) => (
+export const Header = React.memo(({ title, subtitle, onBack, colors, right }) => (
   <View style={styles.header}>
     {onBack ? (
       <Pressable onPress={onBack} style={[styles.backBtn, { backgroundColor: colors.surface, borderColor: colors.border }]}>
@@ -428,17 +487,16 @@ export const Header = ({ title, subtitle, onBack, colors, right }) => (
     </View>
     {right}
   </View>
-);
+));
 
-export const SearchBar = ({ value, onChange, colors, placeholder = 'Cari…' }) => (
+export const SearchBar = React.memo(({ value, onChange, colors, placeholder = 'Cari…' }) => (
   <View style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: 14, paddingHorizontal: 14, height: 46 }}>
     <Ionicons name="search" size={18} color={colors.textDim} />
     <TextInput value={value} onChangeText={onChange} placeholder={placeholder} placeholderTextColor={colors.textDim} style={{ flex: 1, marginLeft: 8, color: colors.text, fontSize: 14, paddingVertical: 0 }} />
     {value ? <Pressable onPress={() => onChange('')}><Ionicons name="close-circle" size={18} color={colors.textDim} /></Pressable> : null}
   </View>
-);
+));
 
-// Fix D1, D2: Toast fade-out berjalan + safe-area aware
 export const Toast = ({ message, colors, topInset = 0 }) => {
   const [visible, setVisible] = useState(!!message);
   const [text, setText] = useState(message);
@@ -492,7 +550,7 @@ export const ProgressModal = ({ visible, title, sub, progress, colors, onCancel 
   </Modal>
 );
 
-export const EmptyState = ({ icon = 'folder-open-outline', title, message, colors, action }) => (
+export const EmptyState = React.memo(({ icon = 'folder-open-outline', title, message, colors, action }) => (
   <View style={{ alignItems: 'center', paddingVertical: 48, paddingHorizontal: 24 }}>
     <View style={{ width: 74, height: 74, borderRadius: 22, backgroundColor: colors.surfaceSoft, borderWidth: 1, borderColor: colors.border, alignItems: 'center', justifyContent: 'center', marginBottom: 16 }}>
       <Ionicons name={icon} size={30} color={colors.textMuted} />
@@ -501,9 +559,9 @@ export const EmptyState = ({ icon = 'folder-open-outline', title, message, color
     {message ? <Text style={{ color: colors.textMuted, fontSize: 12, marginTop: 6, textAlign: 'center', lineHeight: 18 }}>{message}</Text> : null}
     {action}
   </View>
-);
+));
 
-export const DocThumb = ({ doc, colors, size = 46 }) => (
+export const DocThumb = React.memo(({ doc, colors, size = 46 }) => (
   <View style={{ width: size, height: size, borderRadius: 14, backgroundColor: doc.color + '22', borderWidth: 1, borderColor: doc.color + '55', alignItems: 'center', justifyContent: 'center' }}>
     <Text style={{ color: doc.color, fontWeight: '900', fontSize: size * 0.28 }}>{initials(doc.name)}</Text>
     {doc.pages > 1 ? (
@@ -512,9 +570,9 @@ export const DocThumb = ({ doc, colors, size = 46 }) => (
       </View>
     ) : null}
   </View>
-);
+));
 
-export const DocCard = ({ doc, onPress, onToggleFav, colors, folderName }) => (
+export const DocCard = React.memo(({ doc, onPress, onToggleFav, colors, folderName }) => (
   <Pressable onPress={onPress} style={({ pressed }) => [{ backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: 18, padding: 13, flexDirection: 'row', alignItems: 'center', marginBottom: 10, opacity: pressed ? 0.85 : 1 }]}>
     <DocThumb doc={doc} colors={colors} />
     <View style={{ flex: 1, marginLeft: 13, minWidth: 0 }}>
@@ -535,7 +593,13 @@ export const DocCard = ({ doc, onPress, onToggleFav, colors, folderName }) => (
       <Ionicons name="chevron-forward" size={18} color={colors.textDim} />
     )}
   </Pressable>
-);
+), (prev, next) => (
+  prev.doc.id === next.doc.id &&
+  prev.doc.favorite === next.doc.favorite &&
+  prev.doc.name === next.doc.name &&
+  prev.doc.updatedAt === next.doc.updatedAt &&
+  prev.folderName === next.folderName
+));
 
 const styles = StyleSheet.create({
   container: { flex: 1 },
@@ -550,7 +614,7 @@ const circleBtnStyle = { width: 40, height: 40, borderRadius: 20, backgroundColo
 /* ============================================================
    SCREEN: HOME
    ============================================================ */
-const HomeScreen = ({ colors, documents, folders, go, showToast, onToggleFav, folderNameById }) => {
+const HomeScreen = ({ colors, documents, folders, go, onToggleFav, folderNameById }) => {
   const [query, setQuery] = useState('');
 
   const greeting = useMemo(() => {
@@ -561,7 +625,6 @@ const HomeScreen = ({ colors, documents, folders, go, showToast, onToggleFav, fo
     return 'Selamat malam';
   }, []);
 
-  // Fix D11: search sekarang benar-benar bekerja
   const filtered = useMemo(() => {
     if (!query.trim()) return documents;
     const q = query.toLowerCase();
@@ -637,9 +700,9 @@ const HomeScreen = ({ colors, documents, folders, go, showToast, onToggleFav, fo
           <SectionHead title="Dokumen Terbaru" action="Lihat semua" onAction={() => go('documents')} colors={colors} />
           <View style={{ paddingHorizontal: 18 }}>
             {recent.length === 0 ? (
-              <Card colors={colors}>
+              <View style={{ backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: 18, padding: 16 }}>
                 <EmptyState icon="document-outline" title="Belum ada dokumen" message="Scan atau impor dokumen pertama Anda." colors={colors} />
-              </Card>
+              </View>
             ) : (
               recent.map((doc) => (
                 <DocCard key={doc.id} doc={doc} colors={colors} folderName={folderNameById?.(doc.folderId)} onPress={() => go('detail', { docId: doc.id })} onToggleFav={() => onToggleFav(doc.id)} />
@@ -715,10 +778,19 @@ const DocumentsScreen = ({ colors, documents, go, onToggleFav, filterFolderId, f
     }
     if (sort === 'name') list.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
     if (sort === 'pages') list.sort((a, b) => (b.pages || 0) - (a.pages || 0));
-    // Fix D12: 'recent' sort by createdAt timestamp
     if (sort === 'recent') list.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
     return list;
   }, [documents, activeFolderId, favOnly, query, sort]);
+
+  const renderItem = useCallback(({ item }) => (
+    <DocCard
+      doc={item}
+      colors={colors}
+      folderName={folderNameById(item.folderId)}
+      onPress={() => go('detail', { docId: item.id })}
+      onToggleFav={() => onToggleFav(item.id)}
+    />
+  ), [colors, folderNameById, go, onToggleFav]);
 
   return (
     <View style={{ flex: 1 }}>
@@ -748,15 +820,12 @@ const DocumentsScreen = ({ colors, documents, go, onToggleFav, filterFolderId, f
         keyExtractor={(it) => it.id}
         contentContainerStyle={{ paddingHorizontal: 16, paddingTop: 12, paddingBottom: 120 }}
         ListEmptyComponent={<EmptyState icon="search-outline" title="Tidak ada dokumen" message="Coba ubah kata kunci atau filter folder." colors={colors} />}
-        renderItem={({ item }) => (
-          <DocCard
-            doc={item}
-            colors={colors}
-            folderName={folderNameById(item.folderId)}
-            onPress={() => go('detail', { docId: item.id })}
-            onToggleFav={() => onToggleFav(item.id)}
-          />
-        )}
+        renderItem={renderItem}
+        initialNumToRender={8}
+        maxToRenderPerBatch={8}
+        windowSize={5}
+        removeClippedSubviews={Platform.OS === 'android'}
+        updateCellsBatchingPeriod={50}
       />
     </View>
   );
@@ -790,7 +859,7 @@ const FoldersScreen = ({ colors, documents, folders, go }) => (
 );
 
 /* ============================================================
-   SCREEN: SETTINGS (Fix F1: PIN user-configurable)
+   SCREEN: SETTINGS
    ============================================================ */
 const SettingsScreen = ({ colors, themeMode, onToggleTheme, appLock, onToggleLock, onChangePin, qualityPreset, go, showToast }) => {
   const preset = QUALITY_PRESETS.find((p) => p.key === qualityPreset) || QUALITY_PRESETS[1];
@@ -850,7 +919,7 @@ const SettingsScreen = ({ colors, themeMode, onToggleTheme, appLock, onToggleLoc
 
         <GroupTitle>TENTANG</GroupTitle>
         <Group>
-          <SettingRow icon="information-circle-outline" label="Versi Aplikasi" desc="Gandes Scanner 1.1.0" />
+          <SettingRow icon="information-circle-outline" label="Versi Aplikasi" desc="Gandes Scanner 1.2.0" />
         </Group>
       </ScrollView>
 
@@ -889,7 +958,6 @@ const SettingsScreen = ({ colors, themeMode, onToggleTheme, appLock, onToggleLoc
    ============================================================ */
 const QualityScreen = ({ colors, qualityPreset, setQualityPreset, go, showToast }) => {
   const preset = QUALITY_PRESETS.find((p) => p.key === qualityPreset) || QUALITY_PRESETS[1];
-
   return (
     <View style={{ flex: 1 }}>
       <Header title="Kualitas Scan" subtitle="Resolusi output PDF" onBack={() => go('settings')} colors={colors} />
@@ -923,12 +991,6 @@ const QualityScreen = ({ colors, qualityPreset, setQualityPreset, go, showToast 
             </View>
           </Pressable>
         ))}
-
-        <View style={{ marginTop: 20, padding: 14, backgroundColor: colors.surfaceSoft, borderWidth: 1, borderColor: colors.border, borderRadius: 14 }}>
-          <Text style={{ color: colors.textMuted, fontSize: 11, lineHeight: 17 }}>
-            💡 Kualitas lebih tinggi = file lebih besar. Untuk share via chat, pilih Medium. Untuk arsip, pilih HD/Ultra.
-          </Text>
-        </View>
       </ScrollView>
     </View>
   );
@@ -968,7 +1030,7 @@ const PdfToolsScreen = ({ colors, go }) => {
 };
 
 /* ============================================================
-   SCREEN: SCANNER (Fix: pakai DocumentScanner plugin)
+   SCREEN: SCANNER
    ============================================================ */
 const ScannerScreen = ({ colors, go, capturedImages, setCapturedImages, showToast, initialParams }) => {
   const insets = useSafeAreaInsets();
@@ -978,7 +1040,7 @@ const ScannerScreen = ({ colors, go, capturedImages, setCapturedImages, showToas
   useEffect(() => {
     if (initialParams?.openGallery && !galleryTriggered.current) {
       galleryTriggered.current = true;
-      setTimeout(() => pickFromGallery(), 400);
+      setTimeout(() => pickFromGallery(), 500);
     }
   }, [initialParams]);
 
@@ -987,14 +1049,12 @@ const ScannerScreen = ({ colors, go, capturedImages, setCapturedImages, showToas
     try {
       setScanning(true);
       await haptic('medium');
-
       const result = await DocumentScanner.scanDocument({
         maxNumDocuments: 30,
         letUserAdjustCrop: true,
       });
 
       if (result.status === 'success' && result.scannedImages?.length) {
-        // Persist ke documentDirectory
         const persisted = [];
         for (const uri of result.scannedImages) {
           try {
@@ -1019,8 +1079,29 @@ const ScannerScreen = ({ colors, go, capturedImages, setCapturedImages, showToas
 
   const pickFromGallery = async () => {
     try {
-      const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
-      if (status !== 'granted') { showToast('Izin galeri dibutuhkan'); return; }
+      const current = await ImagePicker.getMediaLibraryPermissionsAsync();
+      let status = current.status;
+      if (status === 'undetermined') {
+        const req = await ImagePicker.requestMediaLibraryPermissionsAsync();
+        status = req.status;
+      }
+      if (status !== 'granted') {
+        Alert.alert(
+          'Izin Galeri Dibutuhkan',
+          'Untuk mengimpor gambar, Gandes Scanner butuh izin akses foto.',
+          [
+            { text: 'Batal', style: 'cancel' },
+            {
+              text: 'Buka Settings',
+              onPress: () => {
+                if (Platform.OS === 'ios') Linking.openURL('app-settings:');
+                else Linking.openSettings();
+              },
+            },
+          ]
+        );
+        return;
+      }
       const result = await ImagePicker.launchImageLibraryAsync({
         mediaTypes: ['images'],
         allowsMultipleSelection: true,
@@ -1042,6 +1123,32 @@ const ScannerScreen = ({ colors, go, capturedImages, setCapturedImages, showToas
         go('enhance');
       }
     } catch (e) { showToast('Gagal buka galeri'); }
+  };
+
+  const pickFromFiles = async () => {
+    try {
+      const result = await DocumentPicker.getDocumentAsync({
+        type: ['image/jpeg', 'image/png', 'image/jpg'],
+        copyToCacheDirectory: true,
+        multiple: true,
+      });
+      if (result.canceled) return;
+      const persisted = [];
+      for (const a of result.assets) {
+        try {
+          const perm = await persistImage(a.uri, 'file');
+          persisted.push({ id: uid('file'), uri: perm });
+        } catch (e) {
+          persisted.push({ id: uid('file'), uri: a.uri });
+        }
+      }
+      setCapturedImages((prev) => [...prev, ...persisted]);
+      showToast(`${persisted.length} file diimpor`);
+      go('enhance');
+    } catch (e) {
+      console.error('Pick files error:', e);
+      showToast('Gagal buka file manager');
+    }
   };
 
   const InfoCard = ({ icon, title, desc }) => (
@@ -1083,13 +1190,24 @@ const ScannerScreen = ({ colors, go, capturedImages, setCapturedImages, showToas
             disabled={scanning}
             style={{ marginBottom: 10 }}
           />
-          <Btn
-            label="Impor dari Galeri"
-            icon="images-outline"
-            variant="soft"
-            colors={colors}
-            onPress={pickFromGallery}
-          />
+          <View style={{ flexDirection: 'row', gap: 8 }}>
+            <Btn
+              label="Galeri"
+              icon="images-outline"
+              variant="soft"
+              colors={colors}
+              onPress={pickFromGallery}
+              style={{ flex: 1 }}
+            />
+            <Btn
+              label="File Manager"
+              icon="folder-open-outline"
+              variant="soft"
+              colors={colors}
+              onPress={pickFromFiles}
+              style={{ flex: 1 }}
+            />
+          </View>
         </LinearGradient>
 
         <View style={{ flexDirection: 'row', gap: 10, marginBottom: 10 }}>
@@ -1108,7 +1226,7 @@ const ScannerScreen = ({ colors, go, capturedImages, setCapturedImages, showToas
             </Text>
             <View style={{ flexDirection: 'row', gap: 8 }}>
               <Btn label="Lanjut Enhance" colors={colors} onPress={() => go('enhance')} style={{ flex: 1 }} />
-              <Btn label="Bersihkan" variant="soft" colors={colors} onPress={() => setCapturedImages([])} style={{ flex: 0.6 }} />
+              <Btn label="Bersihkan" variant="soft" colors={colors} onPress={() => setCapturedImages([])} style={{ flex: 0.7 }} />
             </View>
           </View>
         ) : null}
@@ -1118,7 +1236,7 @@ const ScannerScreen = ({ colors, go, capturedImages, setCapturedImages, showToas
 };
 
 /* ============================================================
-   SCREEN: ENHANCE (Fix: honest, tidak klaim filter yang tidak diterapkan)
+   SCREEN: ENHANCE
    ============================================================ */
 const EnhanceScreen = ({ colors, go, capturedImages, setCapturedImages, qualityPreset, showToast, onSaveDocument }) => {
   const insets = useSafeAreaInsets();
@@ -1146,21 +1264,37 @@ const EnhanceScreen = ({ colors, go, capturedImages, setCapturedImages, qualityP
 
       for (let i = 0; i < capturedImages.length; i++) {
         const img = capturedImages[i];
-        const actions = [];
-        // Get current width, resize kalau lebih besar
-        if (img.width && img.width > targetRes) {
-          actions.push({ resize: { width: targetRes } });
-        }
-        const result = await ImageManipulator.manipulateAsync(img.uri, actions, {
-          compress: preset.key === 'compact' ? 0.6 : preset.key === 'medium' ? 0.75 : 0.9,
-          format: ImageManipulator.SaveFormat.JPEG,
-        });
-        // Persist hasil resize
-        let finalUri = result.uri;
+        let processedUri = img.uri;
+        let width = img.width;
+        let height = img.height;
+
         try {
-          finalUri = await persistImage(result.uri, 'enh');
-        } catch (e) {}
-        newImages.push({ ...img, uri: finalUri, width: result.width, height: result.height });
+          // Get actual dimensions
+          const info = await ImageManipulator.manipulateAsync(img.uri, [], { compress: 1, format: ImageManipulator.SaveFormat.JPEG });
+          width = info.width;
+          height = info.height;
+
+          const actions = [];
+          if (width > targetRes) {
+            actions.push({ resize: { width: targetRes } });
+          }
+          const result = await ImageManipulator.manipulateAsync(
+            img.uri,
+            actions,
+            {
+              compress: preset.key === 'compact' ? 0.65 : preset.key === 'medium' ? 0.8 : 0.92,
+              format: ImageManipulator.SaveFormat.JPEG,
+            }
+          );
+          // Persist hasil
+          processedUri = await persistImage(result.uri, 'enh');
+          width = result.width;
+          height = result.height;
+        } catch (e) {
+          console.error('Enhance error:', e);
+        }
+
+        newImages.push({ ...img, uri: processedUri, width, height });
       }
 
       setCapturedImages(newImages);
@@ -1210,7 +1344,7 @@ const EnhanceScreen = ({ colors, go, capturedImages, setCapturedImages, qualityP
       <View style={{ paddingHorizontal: 20, paddingBottom: insets.bottom + 20 }}>
         <View style={{ padding: 12, backgroundColor: colors.surfaceSoft, borderRadius: 12, borderWidth: 1, borderColor: colors.border }}>
           <Text style={{ color: colors.textMuted, fontSize: 11, lineHeight: 17 }}>
-            ℹ️ Simpan akan meng-crop & kompres tiap halaman sesuai preset kualitas ({QUALITY_PRESETS.find(p => p.key === qualityPreset)?.label || 'HD'}) lalu membuat PDF.
+            ℹ️ Simpan akan resize & kompres tiap halaman sesuai preset ({QUALITY_PRESETS.find(p => p.key === qualityPreset)?.label || 'HD'}) lalu membuat PDF.
           </Text>
         </View>
       </View>
@@ -1256,9 +1390,9 @@ const PreviewScreen = ({ colors, go, currentDoc, showToast }) => {
             </View>
           ))
         ) : (
-          <Card colors={colors}>
-            <EmptyState icon="images-outline" title="Preview tidak tersedia" message="Dokumen ini tidak punya page image (mungkin hasil merge/split)." colors={colors} />
-          </Card>
+          <View style={{ backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: 18, padding: 16 }}>
+            <EmptyState icon="images-outline" title="Preview tidak tersedia" message="Dokumen ini tidak punya page image." colors={colors} />
+          </View>
         )}
 
         <Btn label="Bagikan PDF" icon="share-social-outline" colors={colors} onPress={share} style={{ marginTop: 6 }} />
@@ -1394,29 +1528,62 @@ const DetailScreen = ({ colors, go, currentDoc, folders, onToggleFav, onRename, 
 };
 
 /* ============================================================
-   SCREEN: MERGE
+   SCREEN: MERGE (dengan impor PDF dari file manager)
    ============================================================ */
-const MergeScreen = ({ colors, go, documents, folders, showToast, params, onComplete }) => {
+const MergeScreen = ({ colors, go, documents, folders, showToast, params, onComplete, onImportPdf }) => {
   const [selected, setSelected] = useState(params?.selectedId ? [params.selectedId] : []);
+  const [imported, setImported] = useState([]);
+
   const toggle = (id) => setSelected((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
-  const totalPages = selected.reduce((s, id) => { const d = documents.find((x) => x.id === id); return s + (d?.pages || 0); }, 0);
+  const totalPages = selected.reduce((s, id) => { const d = documents.find((x) => x.id === id); return s + (d?.pages || 0); }, 0) +
+    imported.reduce((s, f) => s + (f.pages || 1), 0);
+
+  const importFromFiles = async () => {
+    try {
+      const result = await DocumentPicker.getDocumentAsync({
+        type: 'application/pdf',
+        copyToCacheDirectory: true,
+        multiple: true,
+      });
+      if (result.canceled) return;
+      const files = [];
+      for (const a of result.assets) {
+        try {
+          const perm = await persistPdf(a.uri, 'imported');
+          const info = await FileSystem.getInfoAsync(perm);
+          files.push({
+            id: uid('ext'),
+            name: (a.name || 'document').replace(/\.pdf$/i, ''),
+            uri: perm,
+            size: (info.size || 0) / (1024 * 1024),
+            pages: 1,
+          });
+        } catch (e) {}
+      }
+      setImported((prev) => [...prev, ...files]);
+      showToast(`${files.length} PDF diimpor`);
+    } catch (e) {
+      console.error('Import error:', e);
+      showToast('Gagal impor');
+    }
+  };
 
   const executeMerge = async () => {
-    if (selected.length < 2) return;
+    const allFiles = [
+      ...selected.map((id) => documents.find((x) => x.id === id)).filter((d) => d && d.pdfUri).map((d) => ({ uri: d.pdfUri, name: d.name })),
+      ...imported.map((f) => ({ uri: f.uri, name: f.name })),
+    ];
+    if (allFiles.length < 2) { showToast('Pilih minimal 2 PDF'); return; }
     try {
-      const pdfFiles = selected
-        .map((id) => documents.find((x) => x.id === id))
-        .filter((d) => d && d.pdfUri)
-        .map((d) => ({ uri: d.pdfUri, name: d.name }));
-      if (pdfFiles.length < 2) { showToast('Beberapa dokumen belum punya PDF'); return; }
-      onComplete('start', { total: pdfFiles.length });
-      const result = await mergePdfs(pdfFiles, 'gandes_merged');
+      onComplete('start', { total: allFiles.length });
+      await new Promise((resolve) => InteractionManager.runAfterInteractions(resolve));
+      const result = await mergePdfs(allFiles, 'gandes_merged');
 
       const firstDoc = documents.find((d) => d.id === selected[0]);
       const newDoc = {
         id: uid('doc'),
         name: `Gabungan ${new Date().toLocaleDateString('id-ID')}`,
-        folderId: firstDoc?.folderId || folders[2]?.id || 'f3',
+        folderId: firstDoc?.folderId || 'f3',
         pages: result.pages,
         size: result.size,
         sizeStr: result.sizeStr,
@@ -1432,7 +1599,7 @@ const MergeScreen = ({ colors, go, documents, folders, showToast, params, onComp
       showToast(`✓ ${result.pages} halaman digabung`);
       go('documents');
     } catch (e) {
-      console.error(e);
+      console.error('Merge error:', e);
       onComplete('error');
       showToast('Gagal merge');
     }
@@ -1441,41 +1608,68 @@ const MergeScreen = ({ colors, go, documents, folders, showToast, params, onComp
   const ordered = selected.map((id) => documents.find((d) => d.id === id)).filter(Boolean);
   const others = documents.filter((d) => !selected.includes(d.id));
 
-  const MergeItem = ({ doc, active, index, onPress }) => (
+  const MergeItem = ({ doc, active, index, onPress, onRemove }) => (
     <Pressable onPress={onPress} style={{ flexDirection: 'row', alignItems: 'center', gap: 12, padding: 12, borderRadius: 14, backgroundColor: active ? 'rgba(0,242,254,0.06)' : colors.surface, borderWidth: 1, borderColor: active ? colors.cyan : colors.border, marginBottom: 10 }}>
       <View style={{ width: 24, height: 24, borderRadius: 8, borderWidth: 2, borderColor: active ? colors.cyan : colors.border, backgroundColor: active ? colors.cyan : 'transparent', alignItems: 'center', justifyContent: 'center' }}>
         {active ? <Ionicons name="checkmark" size={14} color="#050811" /> : null}
       </View>
-      <DocThumb doc={doc} colors={colors} size={44} />
+      <DocThumb doc={{ name: doc.name, color: doc.color || '#00f2fe', pages: doc.pages }} colors={colors} size={44} />
       <View style={{ flex: 1, minWidth: 0 }}>
         <Text style={{ color: colors.text, fontWeight: '700', fontSize: 12.5 }} numberOfLines={1}>{doc.name}</Text>
-        <Text style={{ color: colors.textMuted, fontSize: 10, marginTop: 2 }}>{doc.pages} hal • {doc.sizeStr}</Text>
+        <Text style={{ color: colors.textMuted, fontSize: 10, marginTop: 2 }}>{doc.pages || 1} hal • {doc.sizeStr || fmtSize(doc.size || 0)}</Text>
       </View>
       {index ? <Text style={{ color: colors.cyan, fontWeight: '800', fontSize: 11 }}>#{index}</Text> : null}
+      {onRemove ? (
+        <Pressable onPress={onRemove} style={{ padding: 6 }}>
+          <Ionicons name="close-circle" size={18} color={colors.rose} />
+        </Pressable>
+      ) : null}
     </Pressable>
   );
 
   return (
     <View style={{ flex: 1 }}>
-      <Header title="Gabung PDF" subtitle={selected.length ? `${selected.length} dipilih` : 'Pilih 2+ dokumen'} onBack={() => go('pdf-tools')} colors={colors}
-        right={<Btn label="Gabung" colors={colors} disabled={selected.length < 2} onPress={executeMerge} style={{ paddingVertical: 10, paddingHorizontal: 14 }} />}
+      <Header title="Gabung PDF" subtitle={selected.length + imported.length ? `${selected.length + imported.length} dipilih` : 'Pilih 2+ dokumen'} onBack={() => go('pdf-tools')} colors={colors}
+        right={<Btn label="Gabung" colors={colors} disabled={selected.length + imported.length < 2} onPress={executeMerge} style={{ paddingVertical: 10, paddingHorizontal: 14 }} />}
       />
       <ScrollView contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 120 }}>
         <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', backgroundColor: 'rgba(0,242,254,0.08)', borderWidth: 1, borderColor: colors.borderStrong, borderRadius: 16, padding: 14, marginBottom: 16 }}>
           <View>
             <Text style={{ color: colors.cyan, fontSize: 9, fontWeight: '800', letterSpacing: 1 }}>DIPILIH</Text>
-            <Text style={{ color: colors.text, fontSize: 20, fontWeight: '900', marginTop: 4 }}>{selected.length}</Text>
-            <Text style={{ color: colors.textMuted, fontSize: 10, marginTop: 2 }}>{totalPages} halaman total</Text>
+            <Text style={{ color: colors.text, fontSize: 20, fontWeight: '900', marginTop: 4 }}>{selected.length + imported.length}</Text>
+            <Text style={{ color: colors.textMuted, fontSize: 10, marginTop: 2 }}>~{totalPages} halaman</Text>
           </View>
           <Ionicons name="add-circle-outline" size={42} color={colors.cyan} />
         </View>
+
+        <Pressable onPress={importFromFiles} style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10, padding: 14, borderRadius: 14, backgroundColor: colors.surface, borderWidth: 1.5, borderColor: colors.borderStrong, borderStyle: 'dashed', marginBottom: 16 }}>
+          <Ionicons name="folder-open-outline" size={20} color={colors.cyan} />
+          <Text style={{ color: colors.cyan, fontWeight: '800', fontSize: 13 }}>Impor PDF dari File Manager</Text>
+        </Pressable>
+
+        {imported.length > 0 ? (
+          <>
+            <Text style={{ color: colors.cyan, fontSize: 10, fontWeight: '800', letterSpacing: 1, marginBottom: 10 }}>PDF DIIMPOR</Text>
+            {imported.map((f) => (
+              <MergeItem
+                key={f.id}
+                doc={{ name: f.name, color: '#3b82f6', pages: f.pages, size: f.size, sizeStr: fmtSize(f.size) }}
+                active
+                onPress={() => {}}
+                onRemove={() => setImported((prev) => prev.filter((x) => x.id !== f.id))}
+              />
+            ))}
+          </>
+        ) : null}
+
         {ordered.length > 0 ? (
           <>
-            <Text style={{ color: colors.cyan, fontSize: 10, fontWeight: '800', letterSpacing: 1, marginBottom: 10 }}>DIPILIH — URUTAN GABUNG</Text>
+            <Text style={{ color: colors.cyan, fontSize: 10, fontWeight: '800', letterSpacing: 1, marginBottom: 10, marginTop: 16 }}>DIPILIH — URUTAN GABUNG</Text>
             {ordered.map((d, i) => <MergeItem key={d.id} doc={d} active index={i + 1} onPress={() => toggle(d.id)} />)}
           </>
         ) : null}
-        <Text style={{ color: colors.textMuted, fontSize: 10, fontWeight: '800', letterSpacing: 1, marginTop: 20, marginBottom: 10 }}>TAMBAH LAINNYA</Text>
+
+        <Text style={{ color: colors.textMuted, fontSize: 10, fontWeight: '800', letterSpacing: 1, marginTop: 20, marginBottom: 10 }}>TAMBAH DARI DOKUMEN</Text>
         {others.map((d) => <MergeItem key={d.id} doc={d} onPress={() => toggle(d.id)} />)}
       </ScrollView>
     </View>
@@ -1483,9 +1677,9 @@ const MergeScreen = ({ colors, go, documents, folders, showToast, params, onComp
 };
 
 /* ============================================================
-   SCREEN: SPLIT (Fix A10/A11: files masuk ke documents)
+   SCREEN: SPLIT
    ============================================================ */
-const SplitScreen = ({ colors, go, documents, currentDoc, folders, showToast, params, onComplete }) => {
+const SplitScreen = ({ colors, go, documents, currentDoc, showToast, params, onComplete }) => {
   const doc = currentDoc || documents.find((d) => d.id === params?.docId) || documents[0];
   const [mode, setMode] = useState('range');
   const [ranges, setRanges] = useState([{ from: 1, to: 1 }]);
@@ -1497,25 +1691,29 @@ const SplitScreen = ({ colors, go, documents, currentDoc, folders, showToast, pa
     if (!doc.pdfUri) { showToast('Dokumen belum punya PDF'); return; }
     try {
       onComplete('start', { total: 1 });
+      await new Promise((resolve) => InteractionManager.runAfterInteractions(resolve));
+
       if (mode === 'range') {
         const results = await splitPdfByRanges(doc.pdfUri, ranges);
-        // Fix A11: masukkan ke documents
-        const newDocs = results.map((r, i) => ({
-          id: uid('doc'),
-          name: `${doc.name} - Bagian ${i + 1}`,
-          folderId: doc.folderId,
-          pages: r.pages,
-          size: r.size,
-          sizeStr: fmtSize(r.size),
-          updatedAt: 'Baru saja',
-          createdAt: Date.now() + i,
-          favorite: false,
-          color: doc.color,
-          ocr: '',
-          pdfUri: r.uri,
-          pageImages: [],
-        }));
-        for (const nd of newDocs) onComplete('done', nd);
+        for (let i = 0; i < results.length; i++) {
+          const r = results[i];
+          const newDoc = {
+            id: uid('doc'),
+            name: `${doc.name} - Bagian ${i + 1}`,
+            folderId: doc.folderId,
+            pages: r.pages,
+            size: r.size,
+            sizeStr: fmtSize(r.size),
+            updatedAt: 'Baru saja',
+            createdAt: Date.now() + i,
+            favorite: false,
+            color: doc.color,
+            ocr: '',
+            pdfUri: r.uri,
+            pageImages: [],
+          };
+          onComplete('done', newDoc);
+        }
         showToast(`✓ Split jadi ${results.length} file`);
       } else if (mode === 'extract') {
         const res = await extractPdfPages(doc.pdfUri, selectedPages);
@@ -1539,29 +1737,31 @@ const SplitScreen = ({ colors, go, documents, currentDoc, folders, showToast, pa
       } else {
         const allRanges = Array.from({ length: doc.pages }).map((_, i) => ({ from: i + 1, to: i + 1 }));
         const results = await splitPdfByRanges(doc.pdfUri, allRanges);
-        // Fix A10: masukkan ke documents
-        const newDocs = results.map((r, i) => ({
-          id: uid('doc'),
-          name: `${doc.name} - Hal ${i + 1}`,
-          folderId: doc.folderId,
-          pages: r.pages,
-          size: r.size,
-          sizeStr: fmtSize(r.size),
-          updatedAt: 'Baru saja',
-          createdAt: Date.now() + i,
-          favorite: false,
-          color: doc.color,
-          ocr: '',
-          pdfUri: r.uri,
-          pageImages: doc.pageImages?.[i] ? [doc.pageImages[i]] : [],
-        }));
-        for (const nd of newDocs) onComplete('done', nd);
+        for (let i = 0; i < results.length; i++) {
+          const r = results[i];
+          const newDoc = {
+            id: uid('doc'),
+            name: `${doc.name} - Hal ${i + 1}`,
+            folderId: doc.folderId,
+            pages: r.pages,
+            size: r.size,
+            sizeStr: fmtSize(r.size),
+            updatedAt: 'Baru saja',
+            createdAt: Date.now() + i,
+            favorite: false,
+            color: doc.color,
+            ocr: '',
+            pdfUri: r.uri,
+            pageImages: doc.pageImages?.[i] ? [doc.pageImages[i]] : [],
+          };
+          onComplete('done', newDoc);
+        }
         showToast(`✓ ${results.length} file dibuat`);
       }
       onComplete('done');
       go('documents');
     } catch (e) {
-      console.error(e);
+      console.error('Split error:', e);
       onComplete('error');
       showToast('Gagal split');
     }
@@ -1578,6 +1778,7 @@ const SplitScreen = ({ colors, go, documents, currentDoc, folders, showToast, pa
             </Pressable>
           ))}
         </View>
+
         {mode === 'range' ? (
           <>
             {ranges.map((r, i) => (
@@ -1602,7 +1803,7 @@ const SplitScreen = ({ colors, go, documents, currentDoc, folders, showToast, pa
           <>
             <View style={{ padding: 14, backgroundColor: colors.surfaceSoft, borderWidth: 1, borderColor: colors.border, borderRadius: 14, marginBottom: 16 }}>
               <Text style={{ color: colors.textMuted, fontSize: 11, lineHeight: 17 }}>
-                ⚠️ Ini akan membuat {doc.pages} file PDF (1 per halaman) dan menambahkannya ke daftar dokumen.
+                ⚠️ Ini akan membuat {doc.pages} file PDF (1 per halaman).
               </Text>
             </View>
             <Btn label={`Pisah Semua (${doc.pages} file)`} colors={colors} onPress={executeSplit} />
@@ -1633,7 +1834,7 @@ const SplitScreen = ({ colors, go, documents, currentDoc, folders, showToast, pa
 };
 
 /* ============================================================
-   SCREEN: COMPRESS (Fix A6: honest about what it does)
+   SCREEN: COMPRESS
    ============================================================ */
 const CompressScreen = ({ colors, go, documents, currentDoc, showToast, params, onComplete }) => {
   const doc = currentDoc || documents.find((d) => d.id === params?.docId) || documents[0];
@@ -1645,6 +1846,7 @@ const CompressScreen = ({ colors, go, documents, currentDoc, showToast, params, 
     if (!doc.pdfUri) { showToast('Dokumen belum punya PDF'); return; }
     try {
       onComplete('start', { total: 1 });
+      await new Promise((resolve) => InteractionManager.runAfterInteractions(resolve));
       const result = await compressPdf(doc.pdfUri, level);
       const updatedDoc = { ...doc, size: result.size, sizeStr: result.sizeStr, updatedAt: 'Baru saja (compressed)', pdfUri: result.uri };
       onComplete('done', updatedDoc);
@@ -1666,12 +1868,9 @@ const CompressScreen = ({ colors, go, documents, currentDoc, showToast, params, 
         </View>
 
         <View style={{ padding: 14, backgroundColor: 'rgba(245,158,11,0.08)', borderWidth: 1, borderColor: 'rgba(245,158,11,0.3)', borderRadius: 14, marginBottom: 16 }}>
-          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 6 }}>
-            <Ionicons name="information-circle-outline" size={16} color={colors.amber} />
-            <Text style={{ color: colors.amber, fontWeight: '800', fontSize: 11 }}>YANG DIKOMPRES</Text>
-          </View>
+          <Text style={{ color: colors.amber, fontWeight: '800', fontSize: 11, marginBottom: 6 }}>YANG DIKOMPRES</Text>
           <Text style={{ color: colors.textMuted, fontSize: 11, lineHeight: 17 }}>
-            Kompres ini membersihkan metadata (title, author, subject, producer) dan mengoptimasi struktur objek PDF. Untuk hasil signifikan pada PDF hasil scan, sebaiknya re-scan dengan preset kualitas lebih rendah (Compact).
+            Kompres ini membersihkan metadata dan mengoptimasi struktur objek PDF. Untuk hasil signifikan pada PDF scan, sebaiknya scan ulang dengan preset lebih rendah.
           </Text>
         </View>
 
@@ -1695,44 +1894,29 @@ const CompressScreen = ({ colors, go, documents, currentDoc, showToast, params, 
 };
 
 /* ============================================================
-   SCREEN: CONVERT (Fix A5: real PDF → JPG from pageImages)
+   SCREEN: CONVERT
    ============================================================ */
-const ConvertScreen = ({ colors, go, documents, currentDoc, showToast, params, onComplete }) => {
+const ConvertScreen = ({ colors, go, documents, currentDoc, showToast, params, onComplete, onImportImages }) => {
   const doc = currentDoc || documents.find((d) => d.id === params?.docId) || documents[0];
   const [format, setFormat] = useState('jpg');
   const [processing, setProcessing] = useState(false);
+  const [importedImages, setImportedImages] = useState([]);
 
   if (!doc) return <View style={{ flex: 1 }}><Header title="Konversi" onBack={() => go('pdf-tools')} colors={colors} /><EmptyState icon="swap-horizontal-outline" title="Pilih dokumen" colors={colors} /></View>;
 
   const pageImages = doc.pageImages || [];
 
-  const executeConvert = async () => {
+  const convertToImages = async () => {
     if (processing) return;
-    if (pageImages.length === 0) {
-      showToast('Dokumen ini tidak punya page image (hasil merge/split)');
-      return;
-    }
+    if (pageImages.length === 0) { showToast('Dokumen ini tidak punya page image'); return; }
     try {
       setProcessing(true);
       onComplete('start', { total: pageImages.length });
-      const outputs = [];
-      for (let i = 0; i < pageImages.length; i++) {
-        const src = pageImages[i];
-        const targetFormat = format === 'png' ? ImageManipulator.SaveFormat.PNG : ImageManipulator.SaveFormat.JPEG;
-        const result = await ImageManipulator.manipulateAsync(src, [], { compress: 0.92, format: targetFormat });
-        const ext = format === 'png' ? 'png' : 'jpg';
-        const filename = `${doc.name.replace(/[^a-z0-9]/gi, '_')}_hal${i + 1}.${ext}`;
-        const dest = `${FileSystem.documentDirectory}${filename}`;
-        await FileSystem.copyAsync({ from: result.uri, to: dest });
-        outputs.push(dest);
-      }
+      const outputs = await convertImages(pageImages, format, doc.name.replace(/[^a-z0-9]/gi, '_'));
       onComplete('done');
-      showToast(`✓ ${outputs.length} file ${format.toUpperCase()} diekspor`);
-      // Tawarkan share
-      if (outputs.length === 1 && (await Sharing.isAvailableAsync())) {
+      showToast(`✓ ${outputs.length} file ${format.toUpperCase()} dibuat`);
+      if (outputs.length > 0 && (await Sharing.isAvailableAsync())) {
         await Sharing.shareAsync(outputs[0]);
-      } else {
-        showToast(`File tersimpan di folder aplikasi (${outputs.length} file)`);
       }
     } catch (e) {
       console.error(e);
@@ -1743,53 +1927,110 @@ const ConvertScreen = ({ colors, go, documents, currentDoc, showToast, params, o
     }
   };
 
+  const importImages = async () => {
+    try {
+      const result = await DocumentPicker.getDocumentAsync({
+        type: ['image/jpeg', 'image/png', 'image/jpg'],
+        copyToCacheDirectory: true,
+        multiple: true,
+      });
+      if (result.canceled) return;
+      const persisted = [];
+      for (const a of result.assets) {
+        try {
+          const perm = await persistImage(a.uri, 'imgpdf');
+          persisted.push(perm);
+        } catch (e) {}
+      }
+      setImportedImages((prev) => [...prev, ...persisted]);
+      showToast(`${persisted.length} gambar siap dikonversi`);
+    } catch (e) {
+      console.error(e);
+      showToast('Gagal impor');
+    }
+  };
+
+  const buildPdfFromImages = async () => {
+    if (importedImages.length === 0) { showToast('Impor gambar dulu'); return; }
+    try {
+      setProcessing(true);
+      onComplete('start', { total: importedImages.length });
+      const result = await imagesToPdf(importedImages, 'from_images');
+      const newDoc = {
+        id: uid('doc'),
+        name: `Dari Gambar ${new Date().toLocaleDateString('id-ID')}`,
+        folderId: 'f3',
+        pages: result.pages,
+        size: result.size,
+        sizeStr: result.sizeStr,
+        updatedAt: 'Baru saja',
+        createdAt: Date.now(),
+        favorite: false,
+        color: '#8b5cf6',
+        ocr: '',
+        pdfUri: result.uri,
+        pageImages: importedImages,
+      };
+      onComplete('done', newDoc);
+      setImportedImages([]);
+      showToast(`✓ PDF dari ${result.pages} gambar dibuat`);
+      go('documents');
+    } catch (e) {
+      console.error(e);
+      onComplete('error');
+      showToast('Gagal buat PDF');
+    } finally {
+      setProcessing(false);
+    }
+  };
+
   return (
     <View style={{ flex: 1 }}>
-      <Header title="Konversi" subtitle={doc.name} onBack={() => go('pdf-tools')} colors={colors} />
+      <Header title="Konversi" subtitle="PDF ↔ Gambar" onBack={() => go('pdf-tools')} colors={colors} />
       <ScrollView contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 120 }}>
-        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12, padding: 14, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: 14, marginBottom: 16 }}>
-          <DocThumb doc={doc} colors={colors} size={46} />
-          <View style={{ flex: 1 }}>
-            <Text style={{ color: colors.text, fontWeight: '800', fontSize: 13 }} numberOfLines={1}>{doc.name}</Text>
-            <Text style={{ color: colors.textMuted, fontSize: 10, marginTop: 3 }}>{doc.pages} halaman • {pageImages.length} page image tersedia</Text>
+        {/* PDF to Image */}
+        <View style={{ padding: 16, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: 16, marginBottom: 16 }}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 12 }}>
+            <Ionicons name="document-text-outline" size={20} color={colors.cyan} />
+            <Text style={{ color: colors.text, fontWeight: '800', fontSize: 14 }}>PDF → Gambar</Text>
           </View>
+          {pageImages.length === 0 ? (
+            <Text style={{ color: colors.textMuted, fontSize: 11, lineHeight: 17 }}>
+              Dokumen ini tidak punya page image (hasil merge/split tidak bisa).
+            </Text>
+          ) : (
+            <>
+              <Text style={{ color: colors.textMuted, fontSize: 11, marginBottom: 12 }}>{doc.name} • {pageImages.length} halaman</Text>
+              <View style={{ flexDirection: 'row', gap: 8, marginBottom: 12 }}>
+                {CONVERT_FORMATS.map((f) => (
+                  <Pressable key={f.key} onPress={() => setFormat(f.key)} style={{ flex: 1, padding: 10, borderRadius: 12, backgroundColor: format === f.key ? 'rgba(0,242,254,0.08)' : colors.surfaceSoft, borderWidth: 1, borderColor: format === f.key ? colors.cyan : colors.border, alignItems: 'center' }}>
+                    <Text style={{ color: format === f.key ? colors.cyan : colors.text, fontWeight: '800', fontSize: 13 }}>{f.label}</Text>
+                  </Pressable>
+                ))}
+              </View>
+              <Btn label={`Konversi ke ${format.toUpperCase()}`} colors={colors} onPress={convertToImages} disabled={processing} />
+            </>
+          )}
         </View>
 
-        {pageImages.length === 0 ? (
-          <View style={{ padding: 16, backgroundColor: 'rgba(245,158,11,0.08)', borderWidth: 1, borderColor: 'rgba(245,158,11,0.3)', borderRadius: 14 }}>
-            <Text style={{ color: colors.amber, fontWeight: '800', fontSize: 12, marginBottom: 6 }}>⚠️ Tidak Bisa Konversi</Text>
-            <Text style={{ color: colors.textMuted, fontSize: 11, lineHeight: 17 }}>
-              Dokumen ini tidak memiliki page image (mungkin dari merge/split). Hanya dokumen hasil scan langsung yang bisa dikonversi.
-            </Text>
+        {/* Image to PDF */}
+        <View style={{ padding: 16, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: 16 }}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 12 }}>
+            <Ionicons name="images-outline" size={20} color={colors.violet} />
+            <Text style={{ color: colors.text, fontWeight: '800', fontSize: 14 }}>Gambar → PDF</Text>
           </View>
-        ) : (
-          <>
-            <Text style={{ color: colors.textMuted, fontSize: 10, fontWeight: '800', letterSpacing: 1, marginBottom: 10 }}>FORMAT</Text>
-            <View style={{ flexDirection: 'row', flexWrap: 'wrap', marginHorizontal: -5 }}>
-              {CONVERT_FORMATS.map((f) => (
-                <View key={f.key} style={{ width: '50%', padding: 5 }}>
-                  <Pressable onPress={() => setFormat(f.key)} style={{ padding: 14, borderRadius: 14, backgroundColor: format === f.key ? 'rgba(0,242,254,0.08)' : colors.surface, borderWidth: 1, borderColor: format === f.key ? colors.cyan : colors.border, flexDirection: 'row', alignItems: 'center', gap: 10 }}>
-                    <View style={{ width: 40, height: 40, borderRadius: 12, backgroundColor: f.color + '22', borderWidth: 1, borderColor: f.color + '55', alignItems: 'center', justifyContent: 'center' }}>
-                      <Text style={{ color: f.color, fontWeight: '900', fontSize: 10 }}>{f.label}</Text>
-                    </View>
-                    <View style={{ flex: 1 }}>
-                      <Text style={{ color: colors.text, fontWeight: '800', fontSize: 12 }}>{f.label}</Text>
-                      <Text style={{ color: colors.textMuted, fontSize: 9, marginTop: 2 }}>{f.desc}</Text>
-                    </View>
-                  </Pressable>
-                </View>
-              ))}
-            </View>
-
-            <View style={{ marginTop: 16, padding: 14, backgroundColor: colors.surfaceSoft, borderWidth: 1, borderColor: colors.border, borderRadius: 14 }}>
-              <Text style={{ color: colors.textMuted, fontSize: 11, lineHeight: 17 }}>
-                Akan mengekspor {pageImages.length} file {format.toUpperCase()} ke folder aplikasi.
-              </Text>
-            </View>
-
-            <Btn label={`Konversi ke ${format.toUpperCase()}`} icon="swap-horizontal-outline" colors={colors} onPress={executeConvert} disabled={processing} style={{ marginTop: 20 }} />
-          </>
-        )}
+          {importedImages.length === 0 ? (
+            <Text style={{ color: colors.textMuted, fontSize: 11, marginBottom: 12 }}>Belum ada gambar. Impor dari file manager.</Text>
+          ) : (
+            <Text style={{ color: colors.textMuted, fontSize: 11, marginBottom: 12 }}>{importedImages.length} gambar siap dikonversi</Text>
+          )}
+          <View style={{ flexDirection: 'row', gap: 8 }}>
+            <Btn label="Impor Gambar" icon="folder-open-outline" variant="soft" colors={colors} onPress={importImages} style={{ flex: 1 }} />
+            {importedImages.length > 0 ? (
+              <Btn label="Buat PDF" colors={colors} onPress={buildPdfFromImages} disabled={processing} style={{ flex: 1 }} />
+            ) : null}
+          </View>
+        </View>
       </ScrollView>
     </View>
   );
@@ -1809,6 +2050,7 @@ const WatermarkScreen = ({ colors, go, documents, currentDoc, showToast, params,
     if (!text.trim()) { showToast('Isi teks watermark'); return; }
     try {
       onComplete('start', { total: 1 });
+      await new Promise((resolve) => InteractionManager.runAfterInteractions(resolve));
       const result = await watermarkPdf(doc.pdfUri, text.trim());
       const updatedDoc = { ...doc, pdfUri: result.uri, updatedAt: 'Baru saja (watermarked)' };
       onComplete('done', updatedDoc);
@@ -1842,7 +2084,7 @@ const WatermarkScreen = ({ colors, go, documents, currentDoc, showToast, params,
 };
 
 /* ============================================================
-   SCREEN: LOCK (Fix F1, F2: PIN dari storage, no hint)
+   SCREEN: LOCK
    ============================================================ */
 const LockScreen = ({ colors, storedPin, onUnlock }) => {
   const [pin, setPin] = useState('');
@@ -1904,7 +2146,7 @@ const LockScreen = ({ colors, storedPin, onUnlock }) => {
 /* ============================================================
    BOTTOM DOCK
    ============================================================ */
-const BottomDock = ({ colors, current, go }) => {
+const BottomDock = React.memo(({ colors, current, go }) => {
   const insets = useSafeAreaInsets();
   const tabs = [
     { k: 'home', icon: 'home-outline', label: 'Home' },
@@ -1936,14 +2178,14 @@ const BottomDock = ({ colors, current, go }) => {
       })}
     </View>
   );
-};
+});
 
 /* ============================================================
    APP ROOT
    ============================================================ */
 const TAB_SCREENS = ['home', 'documents', 'folders', 'settings', 'pdf-tools'];
 
-const AppInner = () => {
+const AppInner = ({ onReady }) => {
   const insets = useSafeAreaInsets();
   const [themeMode, setThemeMode] = useState('dark');
   const [stack, setStack] = useState([{ name: 'home', params: {} }]);
@@ -1971,7 +2213,6 @@ const AppInner = () => {
     toastTimer.current = setTimeout(() => setToast(null), 2200);
   }, []);
 
-  // Cleanup timers on unmount (Fix C3)
   useEffect(() => {
     return () => {
       if (toastTimer.current) clearTimeout(toastTimer.current);
@@ -1981,6 +2222,7 @@ const AppInner = () => {
 
   // Hydrate
   useEffect(() => {
+    let cancelled = false;
     (async () => {
       try {
         const [savedDocs, savedFolders, savedSettings, savedTheme, savedPin] = await Promise.all([
@@ -1990,6 +2232,7 @@ const AppInner = () => {
           Storage.get(STORAGE_KEYS.THEME),
           Storage.get(STORAGE_KEYS.PIN),
         ]);
+        if (cancelled) return;
         if (savedDocs) setDocuments(savedDocs);
         if (savedFolders) setFolders(savedFolders);
         if (savedSettings) {
@@ -1999,16 +2242,20 @@ const AppInner = () => {
         if (savedTheme) setThemeMode(savedTheme);
         if (savedPin) setStoredPin(savedPin);
       } catch (e) {}
-      finally { setHydrated(true); }
+      finally {
+        if (!cancelled) {
+          setHydrated(true);
+          onReady?.();
+        }
+      }
     })();
+    return () => { cancelled = true; };
   }, []);
 
-  // Persist (Fix B2: alert kalau gagal)
+  // Persist
   useEffect(() => {
     if (!hydrated) return;
-    Storage.setJSON(STORAGE_KEYS.DOCS, documents).then((ok) => {
-      if (!ok) console.warn('Gagal simpan documents');
-    });
+    Storage.setJSON(STORAGE_KEYS.DOCS, documents);
   }, [documents, hydrated]);
   useEffect(() => { if (hydrated) Storage.setJSON(STORAGE_KEYS.FOLDERS, folders); }, [folders, hydrated]);
   useEffect(() => { if (hydrated) Storage.setJSON(STORAGE_KEYS.SETTINGS, { appLock, qualityPreset }); }, [appLock, qualityPreset, hydrated]);
@@ -2021,7 +2268,6 @@ const AppInner = () => {
     });
   }, []);
 
-  const goBack = useCallback(() => setStack((prev) => (prev.length > 1 ? prev.slice(0, -1) : prev)), []);
   const switchTab = useCallback((name) => setStack([{ name, params: {} }]), []);
 
   const toggleFavorite = useCallback((id) => {
@@ -2049,7 +2295,6 @@ const AppInner = () => {
     }
   }, [showToast, go]);
 
-  // Fix A8: delete page konsisten (pages & pageImages)
   const deletePage = useCallback((id, idx) => {
     setDocuments((prev) => prev.map((d) => {
       if (d.id !== id) return d;
@@ -2060,7 +2305,6 @@ const AppInner = () => {
     showToast('Halaman dihapus');
   }, [showToast]);
 
-  // Fix A9: add page harus dari scan, buka scanner sebagai "add page mode"
   const addPage = useCallback((id) => {
     go('scanner', { appendToDocId: id });
   }, [go]);
@@ -2091,11 +2335,11 @@ const AppInner = () => {
       setProgress({ visible: false, title: '', sub: '', value: 0 });
       haptic('success');
       go('home');
-      showToast(`✓ ${images.length} halaman disimpan (${pdfResult.sizeStr})`);
+      showToast(`✓ ${images.length} halaman (${pdfResult.sizeStr})`);
     } catch (e) {
-      console.error(e);
+      console.error('Save error:', e);
       setProgress({ visible: false, title: '', sub: '', value: 0 });
-      showToast('Gagal menyimpan dokumen');
+      showToast('Gagal menyimpan: ' + (e.message || 'unknown'));
     }
   }, [go, showToast]);
 
@@ -2147,12 +2391,11 @@ const AppInner = () => {
     const docId = currentScreen.params?.docId;
     if (!docId) return null;
     return documents.find((d) => d.id === docId) || null;
-  }, [currentScreen, documents]);
+  }, [currentScreen.params?.docId, documents]);
 
   const folderNameById = useCallback((id) => folders.find((f) => f.id === id)?.name || 'DOC', [folders]);
 
   if (!hydrated) {
-    // Fix E7: loading pakai theme aktif
     return (
       <View style={{ flex: 1, backgroundColor: colors.bg, alignItems: 'center', justifyContent: 'center' }}>
         <ActivityIndicator color={colors.cyan} size="large" />
@@ -2178,7 +2421,7 @@ const AppInner = () => {
       case 'settings': return <SettingsScreen colors={colors} themeMode={themeMode} onToggleTheme={() => setThemeMode((m) => (m === 'dark' ? 'light' : 'dark'))} appLock={appLock} onToggleLock={(v) => {
         setAppLock(v);
         if (!v) setUnlocked(true);
-        else setUnlocked(false);  // Fix D7
+        else setUnlocked(false);
         showToast(v ? '🔒 Kunci aktif' : 'Kunci nonaktif');
       }} onChangePin={changePin} qualityPreset={qualityPreset} go={go} showToast={showToast} />;
       case 'quality': return <QualityScreen colors={colors} qualityPreset={qualityPreset} setQualityPreset={setQualityPreset} go={go} showToast={showToast} />;
@@ -2188,7 +2431,7 @@ const AppInner = () => {
       case 'preview': return <PreviewScreen colors={colors} go={go} currentDoc={currentDoc} showToast={showToast} />;
       case 'detail': return <DetailScreen colors={colors} go={go} currentDoc={currentDoc} folders={folders} onToggleFav={toggleFavorite} onRename={renameDoc} onDelete={deleteDoc} onDeletePage={deletePage} onAddPage={addPage} showToast={showToast} />;
       case 'merge': return <MergeScreen colors={colors} go={go} documents={documents} folders={folders} showToast={showToast} params={params} onComplete={onToolProgress} />;
-      case 'split': return <SplitScreen colors={colors} go={go} documents={documents} currentDoc={currentDoc} folders={folders} showToast={showToast} params={params} onComplete={onToolProgress} />;
+      case 'split': return <SplitScreen colors={colors} go={go} documents={documents} currentDoc={currentDoc} showToast={showToast} params={params} onComplete={onToolProgress} />;
       case 'compress': return <CompressScreen colors={colors} go={go} documents={documents} currentDoc={currentDoc} showToast={showToast} params={params} onComplete={onToolProgress} />;
       case 'convert': return <ConvertScreen colors={colors} go={go} documents={documents} currentDoc={currentDoc} showToast={showToast} params={params} onComplete={onToolProgress} />;
       case 'watermark': return <WatermarkScreen colors={colors} go={go} documents={documents} currentDoc={currentDoc} showToast={showToast} params={params} onComplete={onToolProgress} />;
@@ -2217,13 +2460,30 @@ const AppInner = () => {
   );
 };
 
-const App = () => (
-  <SafeAreaProvider>
-    <SafeAreaView style={{ flex: 1, backgroundColor: '#080b11' }} edges={['top']}>
-      <StatusBar style="light" />
-      <AppInner />
-    </SafeAreaView>
-  </SafeAreaProvider>
-);
+const App = () => {
+  const [ready, setReady] = useState(false);
+
+  const handleReady = useCallback(() => {
+    setReady(true);
+    SplashScreen.hideAsync().catch(() => {});
+  }, []);
+
+  // Fallback: paksa hide splash setelah 4 detik
+  useEffect(() => {
+    const t = setTimeout(() => {
+      SplashScreen.hideAsync().catch(() => {});
+    }, 4000);
+    return () => clearTimeout(t);
+  }, []);
+
+  return (
+    <SafeAreaProvider>
+      <SafeAreaView style={{ flex: 1, backgroundColor: '#080b11' }} edges={['top']}>
+        <StatusBar style="light" />
+        <AppInner onReady={handleReady} />
+      </SafeAreaView>
+    </SafeAreaProvider>
+  );
+};
 
 export default App;
