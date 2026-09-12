@@ -1,0 +1,113 @@
+{
+  "expo": {
+    "name": "Gandes Scanner",
+    "slug": "gandes-scanner",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "automatic",
+    "newArchEnabled": true,
+    "scheme": "gandes",
+    "icon": "./assets/icon.png",
+
+    "splash": {
+      "image": "./assets/splash.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#080b11"
+    },
+
+    "assetBundlePatterns": ["**/*"],
+
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.gandes.scanner",
+      "buildNumber": "1",
+      "infoPlist": {
+        "NSCameraUsageDescription": "Gandes Scanner membutuhkan akses kamera untuk memindai dokumen Anda.",
+        "NSPhotoLibraryUsageDescription": "Gandes Scanner membutuhkan akses galeri untuk mengimpor gambar dokumen.",
+        "NSPhotoLibraryAddUsageDescription": "Gandes Scanner membutuhkan izin menyimpan hasil scan ke galeri Anda.",
+        "NSFaceIDUsageDescription": "Gandes Scanner menggunakan Face ID untuk mengamankan dokumen Anda.",
+        "NSDocumentsFolderUsageDescription": "Gandes Scanner membutuhkan akses folder dokumen untuk menyimpan hasil scan.",
+        "UIFileSharingEnabled": true,
+        "LSSupportsOpeningDocumentsInPlace": true
+      }
+    },
+
+    "android": {
+      "package": "com.gandes.scanner",
+      "versionCode": 1,
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#080b11"
+      },
+      "permissions": [
+        "CAMERA",
+        "READ_EXTERNAL_STORAGE",
+        "WRITE_EXTERNAL_STORAGE",
+        "READ_MEDIA_IMAGES",
+        "USE_BIOMETRIC",
+        "USE_FINGERPRINT",
+        "VIBRATE",
+        "WAKE_LOCK"
+      ],
+      "blockedPermissions": [
+        "android.permission.RECORD_AUDIO",
+        "android.permission.ACCESS_FINE_LOCATION",
+        "android.permission.ACCESS_COARSE_LOCATION"
+      ],
+      "softwareKeyboardLayoutMode": "pan"
+    },
+
+    "web": {
+      "favicon": "./assets/favicon.png",
+      "bundler": "metro"
+    },
+
+    "plugins": [
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Gandes Scanner membutuhkan akses kamera untuk memindai dokumen Anda."
+        }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Gandes Scanner membutuhkan akses galeri untuk mengimpor gambar dokumen.",
+          "cameraPermission": "Gandes Scanner membutuhkan akses kamera untuk memindai dokumen Anda."
+        }
+      ],
+      [
+        "expo-media-library",
+        {
+          "photosPermission": "Gandes Scanner membutuhkan izin membaca galeri.",
+          "savePhotosPermission": "Gandes Scanner membutuhkan izin menyimpan hasil scan ke galeri.",
+          "isAccessMediaLocationEnabled": false
+        }
+      ],
+      [
+        "expo-local-authentication",
+        {
+          "faceIDPermission": "Gandes Scanner menggunakan Face ID untuk mengamankan dokumen Anda."
+        }
+      ],
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "compileSdkVersion": 35,
+            "targetSdkVersion": 35,
+            "minSdkVersion": 24,
+            "buildToolsVersion": "35.0.0",
+            "kotlinVersion": "2.0.21",
+            "usesCleartextTraffic": false,
+            "enableProguardInReleaseBuilds": true,
+            "enableShrinkResourcesInReleaseBuilds": true
+          },
+          "ios": {
+            "deploymentTarget": "15.1"
+          }
+        }
+      ]
+    ]
+  }
+}
