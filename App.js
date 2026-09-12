@@ -3,8 +3,11 @@ import { Buffer } from 'buffer';
 global.Buffer = global.Buffer || Buffer;
 
 /**
- * Gandes Scanner
- * Modern AI Document Scanner - Offline First
+ * Gandes Scanner v1.1.0
+ * Modern Document Scanner - Offline First
+ * - Auto edge detection via react-native-document-scanner-plugin
+ * - Data integrity: pages === pageImages.length
+ * - Persistent storage: file disimpan di documentDirectory (bukan cache)
  */
 
 import React, {
@@ -33,7 +36,6 @@ import {
   Dimensions,
   Platform,
   Alert,
-  KeyboardAvoidingView,
 } from 'react-native';
 
 import { StatusBar } from 'expo-status-bar';
@@ -49,10 +51,10 @@ import * as ImagePicker from 'expo-image-picker';
 import * as ImageManipulator from 'expo-image-manipulator';
 import * as LocalAuthentication from 'expo-local-authentication';
 import * as Haptics from 'expo-haptics';
-import { CameraView, useCameraPermissions } from 'expo-camera';
+import DocumentScanner from 'react-native-document-scanner-plugin';
 import { PDFDocument, rgb, StandardFonts, degrees } from 'pdf-lib';
 
-const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get('window');
+const { width: SCREEN_W } = Dimensions.get('window');
 
 /* ============================================================
    THEME COLORS
@@ -102,6 +104,7 @@ const COLORS = {
   },
 };
 
+// Folder pakai ID stabil, bukan name (fix B3)
 const DEFAULT_FOLDERS = [
   { id: 'f1', name: 'Invoice', color: '#00f2fe', glyph: 'INV' },
   { id: 'f2', name: 'Identitas', color: '#10b981', glyph: 'ID' },
@@ -111,33 +114,21 @@ const DEFAULT_FOLDERS = [
 ];
 
 const QUALITY_PRESETS = [
-  { key: 'ultra', label: 'Ultra HD', badge: '4K', dpi: 400, res: 4000, sizeMult: 3.5, tag: 'PRO', desc: 'Arsip & cetak ulang' },
-  { key: 'hd', label: 'HD', badge: 'HD', dpi: 300, res: 2500, sizeMult: 2.0, tag: 'REC', desc: 'Standar scan profesional' },
-  { key: 'medium', label: 'Medium', badge: 'MD', dpi: 200, res: 1600, sizeMult: 1.0, tag: '', desc: 'Share via chat & email' },
-  { key: 'compact', label: 'Compact', badge: 'LT', dpi: 150, res: 1000, sizeMult: 0.4, tag: '', desc: 'Hemat storage' },
-  { key: 'auto', label: 'Auto', badge: 'AI', dpi: 0, res: 0, sizeMult: 1.5, tag: '', desc: 'Biarkan AI menentukan' },
-];
-
-const FILTERS = [
-  { key: 'original', label: 'Original', bg: '#FAFAF7' },
-  { key: 'auto', label: 'Auto', bg: '#FBFBF8' },
-  { key: 'bw', label: 'B&W', bg: '#F5F5F5' },
-  { key: 'gray', label: 'Grayscale', bg: '#E7E7E7' },
-  { key: 'doc', label: 'Document', bg: '#FFFDF5' },
-  { key: 'photo', label: 'Photo', bg: '#F1E8D8' },
+  { key: 'ultra', label: 'Ultra HD', badge: '4K', dpi: 400, res: 4000, tag: 'PRO', desc: 'Arsip & cetak ulang' },
+  { key: 'hd', label: 'HD', badge: 'HD', dpi: 300, res: 2500, tag: 'REC', desc: 'Standar scan profesional' },
+  { key: 'medium', label: 'Medium', badge: 'MD', dpi: 200, res: 1600, tag: '', desc: 'Share via chat & email' },
+  { key: 'compact', label: 'Compact', badge: 'LT', dpi: 150, res: 1000, tag: '', desc: 'Hemat storage' },
 ];
 
 const COMPRESS_LEVELS = [
-  { key: 'light', label: 'Light', ratio: 30, desc: 'Turun kualitas 90%' },
-  { key: 'balanced', label: 'Balanced', ratio: 55, desc: 'Kualitas 70%' },
-  { key: 'aggressive', label: 'Aggressive', ratio: 75, desc: 'Kualitas 50%' },
-  { key: 'extreme', label: 'Extreme', ratio: 88, desc: 'Kualitas 30%' },
+  { key: 'light', label: 'Light', ratio: 20, desc: 'Metadata cleanup' },
+  { key: 'balanced', label: 'Balanced', ratio: 40, desc: 'Object stream optimize' },
+  { key: 'aggressive', label: 'Aggressive', ratio: 60, desc: 'Strip metadata + streams' },
 ];
 
 const CONVERT_FORMATS = [
-  { key: 'jpg', label: 'JPG', desc: 'Gambar terkompresi', size: '~150 KB/hal', color: '#f59e0b' },
-  { key: 'png', label: 'PNG', desc: 'Gambar tanpa kompresi', size: '~800 KB/hal', color: '#8b5cf6' },
-  { key: 'txt', label: 'TXT', desc: 'Teks dari OCR', size: '~5 KB/hal', color: '#64748b' },
+  { key: 'jpg', label: 'JPG', desc: 'Dari page image', color: '#f59e0b' },
+  { key: 'png', label: 'PNG', desc: 'Dari page image', color: '#8b5cf6' },
 ];
 
 const ANNO_COLORS = ['#00f2fe', '#f59e0b', '#10b981', '#ef4444', '#8b5cf6', '#111827'];
@@ -152,7 +143,7 @@ export const fmtSize = (mb) => {
 };
 
 export const initials = (n) => (n || 'XX').slice(0, 2).toUpperCase();
-export const uid = (prefix = 'id') => `${prefix}${Date.now()}${Math.floor(Math.random() * 1000)}`;
+export const uid = (prefix = 'id') => `${prefix}${Date.now()}${Math.floor(Math.random() * 10000)}`;
 
 export const haptic = async (style = 'light') => {
   try {
@@ -164,49 +155,48 @@ export const haptic = async (style = 'light') => {
   } catch (e) {}
 };
 
+// Fix B5: escape HTML
+const escapeHtml = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+
+// Fix B1: copy file dari cache ke documentDirectory
+const persistImage = async (srcUri, prefix = 'img') => {
+  const ext = srcUri.split('.').pop()?.split('?')[0] || 'jpg';
+  const filename = `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.${ext}`;
+  const dest = `${FileSystem.documentDirectory}${filename}`;
+  await FileSystem.copyAsync({ from: srcUri, to: dest });
+  return dest;
+};
+
+const persistPdf = async (srcUri, prefix = 'pdf') => {
+  const filename = `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.pdf`;
+  const dest = `${FileSystem.documentDirectory}${filename}`;
+  await FileSystem.copyAsync({ from: srcUri, to: dest });
+  return dest;
+};
+
 /* ============================================================
    STORAGE SERVICE
    ============================================================ */
 const STORAGE_KEYS = {
-  DOCS: '@gandes:documents',
-  FOLDERS: '@gandes:folders',
-  SETTINGS: '@gandes:settings',
+  DOCS: '@gandes:documents:v2',
+  FOLDERS: '@gandes:folders:v2',
+  SETTINGS: '@gandes:settings:v2',
   THEME: '@gandes:theme',
+  PIN: '@gandes:pin',
 };
 
 const Storage = {
-  async getDocs() {
-    try {
-      const raw = await AsyncStorage.getItem(STORAGE_KEYS.DOCS);
-      return raw ? JSON.parse(raw) : null;
-    } catch (e) { return null; }
+  async get(key) {
+    try { return await AsyncStorage.getItem(key); } catch (e) { return null; }
   },
-  async saveDocs(docs) {
-    try { await AsyncStorage.setItem(STORAGE_KEYS.DOCS, JSON.stringify(docs)); } catch (e) {}
+  async set(key, value) {
+    try { await AsyncStorage.setItem(key, value); return true; } catch (e) { return false; }
   },
-  async getFolders() {
-    try {
-      const raw = await AsyncStorage.getItem(STORAGE_KEYS.FOLDERS);
-      return raw ? JSON.parse(raw) : null;
-    } catch (e) { return null; }
+  async getJSON(key) {
+    try { const raw = await AsyncStorage.getItem(key); return raw ? JSON.parse(raw) : null; } catch (e) { return null; }
   },
-  async saveFolders(folders) {
-    try { await AsyncStorage.setItem(STORAGE_KEYS.FOLDERS, JSON.stringify(folders)); } catch (e) {}
-  },
-  async getSettings() {
-    try {
-      const raw = await AsyncStorage.getItem(STORAGE_KEYS.SETTINGS);
-      return raw ? JSON.parse(raw) : null;
-    } catch (e) { return null; }
-  },
-  async saveSettings(settings) {
-    try { await AsyncStorage.setItem(STORAGE_KEYS.SETTINGS, JSON.stringify(settings)); } catch (e) {}
-  },
-  async getTheme() {
-    try { return (await AsyncStorage.getItem(STORAGE_KEYS.THEME)) || 'dark'; } catch (e) { return 'dark'; }
-  },
-  async saveTheme(mode) {
-    try { await AsyncStorage.setItem(STORAGE_KEYS.THEME, mode); } catch (e) {}
+  async setJSON(key, value) {
+    try { await AsyncStorage.setItem(key, JSON.stringify(value)); return true; } catch (e) { return false; }
   },
 };
 
@@ -215,16 +205,22 @@ const Storage = {
    ============================================================ */
 const buildPageHTML = (imageUri) => `
   <div style="page-break-after: always; width:100%; height:100%; display:flex; align-items:center; justify-content:center; padding:0; margin:0;">
-    <img src="${imageUri}" style="max-width:100%; max-height:100%; object-fit:contain;" />
+    <img src="${escapeHtml(imageUri)}" style="max-width:100%; max-height:100%; object-fit:contain;" />
   </div>
 `;
 
 export const imagesToPdf = async (imageUris, docName = 'document') => {
-  const html = `<!DOCTYPE html><html><head><meta name="viewport" content="width=device-width, initial-scale=1.0" /><style>@page { margin: 0; } body { margin: 0; padding: 0; } img { display: block; }</style></head><body>${imageUris.map((u) => buildPageHTML(u)).join('')}</body></html>`;
+  const html = `<!DOCTYPE html><html><head><meta charset="utf-8" /><style>
+    @page { size: A4; margin: 0; }
+    body { margin: 0; padding: 0; }
+    img { display: block; }
+  </style></head><body>${imageUris.map((u) => buildPageHTML(u)).join('')}</body></html>`;
+
   const { uri } = await Print.printToFileAsync({ html, base64: false });
-  const info = await FileSystem.getInfoAsync(uri);
+  const permanent = await persistPdf(uri, docName);
+  const info = await FileSystem.getInfoAsync(permanent);
   const sizeMB = (info.size || 0) / (1024 * 1024);
-  return { uri, size: sizeMB, sizeStr: fmtSize(sizeMB), pages: imageUris.length };
+  return { uri: permanent, size: sizeMB, sizeStr: fmtSize(sizeMB), pages: imageUris.length };
 };
 
 export const mergePdfs = async (pdfFiles, outputName = 'merged') => {
@@ -236,11 +232,12 @@ export const mergePdfs = async (pdfFiles, outputName = 'merged') => {
     copiedPages.forEach((p) => mergedPdf.addPage(p));
   }
   const mergedBytes = await mergedPdf.save();
-  const outPath = `${FileSystem.documentDirectory}${outputName}_${Date.now()}.pdf`;
-  await FileSystem.writeAsStringAsync(outPath, Buffer.from(mergedBytes).toString('base64'), { encoding: FileSystem.EncodingType.Base64 });
-  const info = await FileSystem.getInfoAsync(outPath);
+  const tmp = `${FileSystem.cacheDirectory}merge_${Date.now()}.pdf`;
+  await FileSystem.writeAsStringAsync(tmp, Buffer.from(mergedBytes).toString('base64'), { encoding: FileSystem.EncodingType.Base64 });
+  const permanent = await persistPdf(tmp, outputName);
+  const info = await FileSystem.getInfoAsync(permanent);
   const sizeMB = (info.size || 0) / (1024 * 1024);
-  return { uri: outPath, size: sizeMB, sizeStr: fmtSize(sizeMB), pages: mergedPdf.getPageCount() };
+  return { uri: permanent, size: sizeMB, sizeStr: fmtSize(sizeMB), pages: mergedPdf.getPageCount() };
 };
 
 export const splitPdfByRanges = async (sourceUri, ranges = []) => {
@@ -259,10 +256,11 @@ export const splitPdfByRanges = async (sourceUri, ranges = []) => {
     const copied = await newPdf.copyPages(srcPdf, indices);
     copied.forEach((p) => newPdf.addPage(p));
     const bytes = await newPdf.save();
-    const outPath = `${FileSystem.documentDirectory}split_${i + 1}_${Date.now()}.pdf`;
-    await FileSystem.writeAsStringAsync(outPath, Buffer.from(bytes).toString('base64'), { encoding: FileSystem.EncodingType.Base64 });
-    const info = await FileSystem.getInfoAsync(outPath);
-    results.push({ uri: outPath, pages: safeTo - safeFrom + 1, size: (info.size || 0) / (1024 * 1024) });
+    const tmp = `${FileSystem.cacheDirectory}split_${i + 1}_${Date.now()}.pdf`;
+    await FileSystem.writeAsStringAsync(tmp, Buffer.from(bytes).toString('base64'), { encoding: FileSystem.EncodingType.Base64 });
+    const permanent = await persistPdf(tmp, `split_${i + 1}`);
+    const info = await FileSystem.getInfoAsync(permanent);
+    results.push({ uri: permanent, pages: safeTo - safeFrom + 1, size: (info.size || 0) / (1024 * 1024) });
   }
   return results;
 };
@@ -275,67 +273,93 @@ export const extractPdfPages = async (sourceUri, pageNumbers = []) => {
   const copied = await newPdf.copyPages(srcPdf, indices);
   copied.forEach((p) => newPdf.addPage(p));
   const bytes = await newPdf.save();
-  const outPath = `${FileSystem.documentDirectory}extracted_${Date.now()}.pdf`;
-  await FileSystem.writeAsStringAsync(outPath, Buffer.from(bytes).toString('base64'), { encoding: FileSystem.EncodingType.Base64 });
-  const info = await FileSystem.getInfoAsync(outPath);
-  return { uri: outPath, pages: copied.length, size: (info.size || 0) / (1024 * 1024) };
+  const tmp = `${FileSystem.cacheDirectory}extract_${Date.now()}.pdf`;
+  await FileSystem.writeAsStringAsync(tmp, Buffer.from(bytes).toString('base64'), { encoding: FileSystem.EncodingType.Base64 });
+  const permanent = await persistPdf(tmp, 'extract');
+  const info = await FileSystem.getInfoAsync(permanent);
+  return { uri: permanent, pages: copied.length, size: (info.size || 0) / (1024 * 1024) };
 };
 
+// Fix A12: hitung center berdasarkan ukuran font sebenarnya
 export const watermarkPdf = async (sourceUri, text = 'GANDES SCANNER') => {
   const pdfBytes = await FileSystem.readAsStringAsync(sourceUri, { encoding: FileSystem.EncodingType.Base64 });
   const pdfDoc = await PDFDocument.load(pdfBytes, { ignoreEncryption: true });
   const font = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
+  const fontSize = 48;
   const pages = pdfDoc.getPages();
+
   pages.forEach((page) => {
     const { width, height } = page.getSize();
-    page.drawText(text, { x: width / 2 - text.length * 10, y: height / 2, size: 48, font, color: rgb(0.6, 0.6, 0.6), opacity: 0.35, rotate: degrees(-30) });
+    const textWidth = font.widthOfTextAtSize(text, fontSize);
+    const textHeight = font.heightAtSize(fontSize);
+    page.drawText(text, {
+      x: (width - textWidth) / 2,
+      y: (height - textHeight) / 2,
+      size: fontSize,
+      font,
+      color: rgb(0.5, 0.5, 0.5),
+      opacity: 0.35,
+      rotate: degrees(-30),
+    });
   });
+
   const bytes = await pdfDoc.save();
-  const outPath = `${FileSystem.documentDirectory}watermarked_${Date.now()}.pdf`;
-  await FileSystem.writeAsStringAsync(outPath, Buffer.from(bytes).toString('base64'), { encoding: FileSystem.EncodingType.Base64 });
-  const info = await FileSystem.getInfoAsync(outPath);
-  return { uri: outPath, size: (info.size || 0) / (1024 * 1024), sizeStr: fmtSize((info.size || 0) / (1024 * 1024)), pages: pdfDoc.getPageCount() };
+  const tmp = `${FileSystem.cacheDirectory}wm_${Date.now()}.pdf`;
+  await FileSystem.writeAsStringAsync(tmp, Buffer.from(bytes).toString('base64'), { encoding: FileSystem.EncodingType.Base64 });
+  const permanent = await persistPdf(tmp, 'watermarked');
+  const info = await FileSystem.getInfoAsync(permanent);
+  const sizeMB = (info.size || 0) / (1024 * 1024);
+  return { uri: permanent, size: sizeMB, sizeStr: fmtSize(sizeMB), pages: pdfDoc.getPageCount() };
 };
 
-export const compressPdf = async (sourceUri, ratio = 50) => {
+// Fix A6: honest compress — hapus metadata + object streams (real effect kecil, tapi jujur)
+export const compressPdf = async (sourceUri, level = 'balanced') => {
   const pdfBytes = await FileSystem.readAsStringAsync(sourceUri, { encoding: FileSystem.EncodingType.Base64 });
   const srcPdf = await PDFDocument.load(pdfBytes, { ignoreEncryption: true });
   const newPdf = await PDFDocument.create();
   const copiedPages = await newPdf.copyPages(srcPdf, srcPdf.getPageIndices());
   copiedPages.forEach((p) => newPdf.addPage(p));
+
+  // Buang semua metadata
   newPdf.setTitle('');
   newPdf.setAuthor('');
   newPdf.setSubject('');
   newPdf.setKeywords([]);
-  newPdf.setProducer('Gandes Scanner');
-  newPdf.setCreator('Gandes Scanner');
-  const bytes = await newPdf.save({ useObjectStreams: true });
-  const outPath = `${FileSystem.documentDirectory}compressed_${Date.now()}.pdf`;
-  await FileSystem.writeAsStringAsync(outPath, Buffer.from(bytes).toString('base64'), { encoding: FileSystem.EncodingType.Base64 });
-  const info = await FileSystem.getInfoAsync(outPath);
+  newPdf.setProducer('');
+  newPdf.setCreator('');
+
+  const useStreams = level !== 'light';
+  const bytes = await newPdf.save({ useObjectStreams: useStreams, addDefaultPage: false });
+
+  const tmp = `${FileSystem.cacheDirectory}comp_${Date.now()}.pdf`;
+  await FileSystem.writeAsStringAsync(tmp, Buffer.from(bytes).toString('base64'), { encoding: FileSystem.EncodingType.Base64 });
+  const permanent = await persistPdf(tmp, 'compressed');
+  const info = await FileSystem.getInfoAsync(permanent);
   const newSize = (info.size || 0) / (1024 * 1024);
-  return { uri: outPath, size: newSize, sizeStr: fmtSize(newSize), pages: newPdf.getPageCount() };
+  return { uri: permanent, size: newSize, sizeStr: fmtSize(newSize), pages: newPdf.getPageCount() };
 };
 
 /* ============================================================
-   THEME CONTEXT
+   THEME CONTEXT (Fix E1: benar-benar dipakai)
    ============================================================ */
-const ThemeContext = createContext();
+const ThemeContext = createContext({ colors: COLORS.dark, mode: 'dark' });
 export const useTheme = () => useContext(ThemeContext);
-const ThemeProvider = ({ children, mode, setMode }) => {
-  const colors = COLORS[mode] || COLORS.dark;
-  return <ThemeContext.Provider value={{ colors, mode, setMode }}>{children}</ThemeContext.Provider>;
-};
 
 /* ============================================================
    UI COMPONENTS
    ============================================================ */
 export const Card = ({ children, style, onPress, active, colors }) => {
   const Comp = onPress ? Pressable : View;
-  return <Comp onPress={onPress} style={[{ backgroundColor: colors.surface, borderWidth: 1, borderColor: active ? colors.cyan : colors.border, borderRadius: 18, padding: 16 }, style]}>{children}</Comp>;
+  return (
+    <Comp onPress={onPress} style={[{ backgroundColor: colors.surface, borderWidth: 1, borderColor: active ? colors.cyan : colors.border, borderRadius: 18, padding: 16 }, style]}>
+      {children}
+    </Comp>
+  );
 };
 
+// Fix E9: cegah double-tap
 export const Btn = ({ label, icon, onPress, colors, variant = 'primary', style, disabled }) => {
+  const [busy, setBusy] = useState(false);
   const variants = {
     primary: { bg: colors.cyan, fg: '#050811' },
     soft: { bg: colors.surfaceSoft, fg: colors.text, border: colors.border },
@@ -343,9 +367,36 @@ export const Btn = ({ label, icon, onPress, colors, variant = 'primary', style, 
     ghost: { bg: 'transparent', fg: colors.text },
   };
   const v = variants[variant] || variants.primary;
+
+  const handlePress = async () => {
+    if (busy || disabled) return;
+    setBusy(true);
+    try { await onPress?.(); }
+    finally { setTimeout(() => setBusy(false), 300); }
+  };
+
   return (
-    <Pressable onPress={onPress} disabled={disabled} style={({ pressed }) => [{ backgroundColor: v.bg, borderRadius: 14, paddingVertical: 13, paddingHorizontal: 18, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', opacity: disabled ? 0.4 : pressed ? 0.85 : 1, borderWidth: v.border ? 1 : 0, borderColor: v.border || 'transparent' }, style]}>
-      {icon ? <Ionicons name={icon} size={16} color={v.fg} style={{ marginRight: label ? 8 : 0 }} /> : null}
+    <Pressable
+      onPress={handlePress}
+      disabled={disabled || busy}
+      style={({ pressed }) => [{
+        backgroundColor: v.bg,
+        borderRadius: 14,
+        paddingVertical: 13,
+        paddingHorizontal: 18,
+        flexDirection: 'row',
+        alignItems: 'center',
+        justifyContent: 'center',
+        opacity: disabled ? 0.4 : pressed ? 0.85 : 1,
+        borderWidth: v.border ? 1 : 0,
+        borderColor: v.border || 'transparent',
+      }, style]}
+    >
+      {busy ? (
+        <ActivityIndicator size="small" color={v.fg} style={{ marginRight: label ? 8 : 0 }} />
+      ) : icon ? (
+        <Ionicons name={icon} size={16} color={v.fg} style={{ marginRight: label ? 8 : 0 }} />
+      ) : null}
       {label ? <Text style={{ color: v.fg, fontWeight: '700', fontSize: 14 }}>{label}</Text> : null}
     </Pressable>
   );
@@ -387,28 +438,41 @@ export const SearchBar = ({ value, onChange, colors, placeholder = 'Cari…' }) 
   </View>
 );
 
-export const Toast = ({ message, colors }) => {
+// Fix D1, D2: Toast fade-out berjalan + safe-area aware
+export const Toast = ({ message, colors, topInset = 0 }) => {
+  const [visible, setVisible] = useState(!!message);
+  const [text, setText] = useState(message);
   const opacity = useRef(new Animated.Value(0)).current;
   const translateY = useRef(new Animated.Value(-10)).current;
+
   useEffect(() => {
     if (message) {
-      Animated.parallel([Animated.timing(opacity, { toValue: 1, duration: 200, useNativeDriver: true }), Animated.timing(translateY, { toValue: 0, duration: 200, useNativeDriver: true })]).start();
-    } else {
-      Animated.parallel([Animated.timing(opacity, { toValue: 0, duration: 200, useNativeDriver: true }), Animated.timing(translateY, { toValue: -10, duration: 200, useNativeDriver: true })]).start();
+      setText(message);
+      setVisible(true);
+      Animated.parallel([
+        Animated.timing(opacity, { toValue: 1, duration: 200, useNativeDriver: true }),
+        Animated.timing(translateY, { toValue: 0, duration: 200, useNativeDriver: true }),
+      ]).start();
+    } else if (visible) {
+      Animated.parallel([
+        Animated.timing(opacity, { toValue: 0, duration: 200, useNativeDriver: true }),
+        Animated.timing(translateY, { toValue: -10, duration: 200, useNativeDriver: true }),
+      ]).start(() => setVisible(false));
     }
   }, [message]);
-  if (!message) return null;
+
+  if (!visible || !text) return null;
   return (
-    <Animated.View pointerEvents="none" style={{ position: 'absolute', top: 50, left: 20, right: 20, zIndex: 100, alignItems: 'center', opacity, transform: [{ translateY }] }}>
+    <Animated.View pointerEvents="none" style={{ position: 'absolute', top: topInset + 8, left: 20, right: 20, zIndex: 100, alignItems: 'center', opacity, transform: [{ translateY }] }}>
       <View style={{ backgroundColor: colors.toastBg, borderWidth: 1, borderColor: colors.borderStrong, paddingHorizontal: 18, paddingVertical: 10, borderRadius: 30, flexDirection: 'row', alignItems: 'center', maxWidth: SCREEN_W - 60 }}>
-        <Ionicons name="sparkles" size={14} color={colors.cyan} style={{ marginRight: 8 }} />
-        <Text style={{ color: '#f8fafc', fontWeight: '700', fontSize: 12 }}>{message}</Text>
+        <Ionicons name="checkmark-circle" size={14} color={colors.cyan} style={{ marginRight: 8 }} />
+        <Text style={{ color: '#f8fafc', fontWeight: '700', fontSize: 12 }}>{text}</Text>
       </View>
     </Animated.View>
   );
 };
 
-export const ProgressModal = ({ visible, title, sub, progress, colors }) => (
+export const ProgressModal = ({ visible, title, sub, progress, colors, onCancel }) => (
   <Modal visible={visible} transparent animationType="fade">
     <View style={{ flex: 1, backgroundColor: colors.overlay, alignItems: 'center', justifyContent: 'center', padding: 24 }}>
       <View style={{ backgroundColor: colors.surfaceSolid, borderRadius: 18, padding: 22, width: '100%', maxWidth: 340, borderWidth: 1, borderColor: colors.borderStrong }}>
@@ -418,6 +482,11 @@ export const ProgressModal = ({ visible, title, sub, progress, colors }) => (
           <View style={{ height: '100%', width: `${progress}%`, backgroundColor: colors.cyan, borderRadius: 4 }} />
         </View>
         <Text style={{ color: colors.cyan, fontWeight: '800', fontSize: 12, textAlign: 'center', marginTop: 10, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace' }}>{progress}%</Text>
+        {onCancel ? (
+          <Pressable onPress={onCancel} style={{ marginTop: 14, alignSelf: 'center', paddingHorizontal: 16, paddingVertical: 8 }}>
+            <Text style={{ color: colors.textMuted, fontWeight: '700', fontSize: 12 }}>Batalkan</Text>
+          </Pressable>
+        ) : null}
       </View>
     </View>
   </Modal>
@@ -445,14 +514,14 @@ export const DocThumb = ({ doc, colors, size = 46 }) => (
   </View>
 );
 
-export const DocCard = ({ doc, onPress, onToggleFav, colors }) => (
+export const DocCard = ({ doc, onPress, onToggleFav, colors, folderName }) => (
   <Pressable onPress={onPress} style={({ pressed }) => [{ backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: 18, padding: 13, flexDirection: 'row', alignItems: 'center', marginBottom: 10, opacity: pressed ? 0.85 : 1 }]}>
     <DocThumb doc={doc} colors={colors} />
     <View style={{ flex: 1, marginLeft: 13, minWidth: 0 }}>
       <Text style={{ color: colors.text, fontWeight: '700', fontSize: 13.5 }} numberOfLines={1}>{doc.name}</Text>
       <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 4, gap: 6 }}>
         <View style={{ backgroundColor: colors.surfaceSoft, paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4, borderWidth: 1, borderColor: colors.border }}>
-          <Text style={{ color: colors.cyan, fontSize: 9, fontWeight: '700' }}>{(doc.folder || 'DOC').toUpperCase()}</Text>
+          <Text style={{ color: colors.cyan, fontSize: 9, fontWeight: '700' }}>{(folderName || 'DOC').toUpperCase()}</Text>
         </View>
         <Text style={{ color: colors.textMuted, fontSize: 10 }}>{doc.pages} hal • {doc.sizeStr || fmtSize(doc.size)}</Text>
       </View>
@@ -477,16 +546,12 @@ const styles = StyleSheet.create({
 });
 
 const circleBtnStyle = { width: 40, height: 40, borderRadius: 20, backgroundColor: 'rgba(255,255,255,0.12)', alignItems: 'center', justifyContent: 'center' };
-const cornerStyle = { position: 'absolute', width: 28, height: 28, borderColor: '#00f2fe' };
 
 /* ============================================================
    SCREEN: HOME
    ============================================================ */
-const HomeScreen = ({ colors, documents, folders, go, showToast, onToggleFav }) => {
+const HomeScreen = ({ colors, documents, folders, go, showToast, onToggleFav, folderNameById }) => {
   const [query, setQuery] = useState('');
-  const recent = documents.slice(0, 4);
-  const totalPages = documents.reduce((s, d) => s + (d.pages || 0), 0);
-  const favCount = documents.filter((d) => d.favorite).length;
 
   const greeting = useMemo(() => {
     const h = new Date().getHours();
@@ -496,84 +561,109 @@ const HomeScreen = ({ colors, documents, folders, go, showToast, onToggleFav }) 
     return 'Selamat malam';
   }, []);
 
+  // Fix D11: search sekarang benar-benar bekerja
+  const filtered = useMemo(() => {
+    if (!query.trim()) return documents;
+    const q = query.toLowerCase();
+    return documents.filter((d) =>
+      (d.name || '').toLowerCase().includes(q) ||
+      (d.ocr || '').toLowerCase().includes(q)
+    );
+  }, [documents, query]);
+
+  const recent = filtered.slice(0, 5);
+  const totalPages = documents.reduce((s, d) => s + (d.pages || 0), 0);
+  const favCount = documents.filter((d) => d.favorite).length;
+
   const quickTools = [
     { key: 'merge', label: 'Gabung PDF', desc: 'Satukan beberapa dokumen', icon: 'add-circle-outline', action: () => go('merge') },
     { key: 'split', label: 'Pisah PDF', desc: 'Split range / per halaman', icon: 'cut-outline', action: () => go('split') },
-    { key: 'compress', label: 'Kompres PDF', desc: 'Hemat hingga 80%', icon: 'contract-outline', action: () => go('compress') },
-    { key: 'convert', label: 'Konversi', desc: 'PDF ↔ JPG, PNG, TXT', icon: 'swap-horizontal-outline', action: () => go('convert') },
+    { key: 'compress', label: 'Kompres PDF', desc: 'Bersihkan metadata', icon: 'contract-outline', action: () => go('compress') },
+    { key: 'convert', label: 'Konversi', desc: 'PDF → JPG dari page', icon: 'swap-horizontal-outline', action: () => go('convert') },
   ];
 
   return (
-    <ScrollView style={{ flex: 1 }} contentContainerStyle={{ paddingBottom: 100 }} showsVerticalScrollIndicator={false}>
+    <ScrollView style={{ flex: 1 }} contentContainerStyle={{ paddingBottom: 120 }} showsVerticalScrollIndicator={false}>
       <View style={{ paddingHorizontal: 18, paddingTop: 4 }}>
         <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 18 }}>
           <View>
-            <Text style={{ color: colors.textMuted, fontSize: 11, fontWeight: '600' }}>{greeting} 👋 — Smart AI Scanner</Text>
+            <Text style={{ color: colors.textMuted, fontSize: 11, fontWeight: '600' }}>{greeting} 👋</Text>
             <Text style={{ fontSize: 22, fontWeight: '800', letterSpacing: -0.5, marginTop: 2, color: colors.text }}>Gandes Scanner</Text>
           </View>
           <IconPill name="settings-outline" colors={colors} onPress={() => go('settings')} />
         </View>
-        <SearchBar value={query} onChange={setQuery} colors={colors} placeholder="Cari nama dokumen, folder, atau OCR…" />
+        <SearchBar value={query} onChange={setQuery} colors={colors} placeholder="Cari dokumen…" />
       </View>
 
-      <View style={{ paddingHorizontal: 18, marginTop: 16 }}>
-        <LinearGradient colors={['rgba(0,242,254,0.16)', 'rgba(59,130,246,0.08)']} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={{ borderRadius: 24, padding: 20, borderWidth: 1, borderColor: colors.borderStrong }}>
-          <View style={{ flexDirection: 'row', alignItems: 'center', alignSelf: 'flex-start', backgroundColor: 'rgba(0,242,254,0.12)', paddingHorizontal: 10, paddingVertical: 4, borderRadius: 20, borderWidth: 1, borderColor: 'rgba(0,242,254,0.28)', marginBottom: 12 }}>
-            <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: colors.emerald, marginRight: 6 }} />
-            <Text style={{ color: colors.cyan, fontSize: 9, fontWeight: '800', letterSpacing: 0.5 }}>NEURAL VISION ENGINE</Text>
-          </View>
-          <Text style={{ color: colors.text, fontSize: 17, fontWeight: '800', marginBottom: 6 }}>Mulai Scan Cepat</Text>
-          <Text style={{ color: colors.textMuted, fontSize: 12, marginBottom: 16, lineHeight: 18 }}>Deteksi tepi otomatis, pembersihan bayangan AI, ekspor PDF instan & OCR offline.</Text>
-          <View style={{ flexDirection: 'row', gap: 8 }}>
-            <Btn label="Scan" icon="scan" colors={colors} onPress={() => go('scanner')} style={{ flex: 1.3 }} />
-            <Btn label="Impor" icon="images-outline" variant="soft" colors={colors} onPress={() => go('scanner', { openGallery: true })} style={{ flex: 1 }} />
-          </View>
-        </LinearGradient>
-      </View>
-
-      <View style={{ paddingHorizontal: 18, marginTop: 18, flexDirection: 'row', gap: 8 }}>
-        <StatBox value={documents.length} label="DOKUMEN" colors={colors} />
-        <StatBox value={totalPages} label="HALAMAN" colors={colors} accent={colors.emerald} />
-        <StatBox value={favCount} label="FAVORIT" colors={colors} accent={colors.amber} />
-      </View>
-
-      <SectionHead title="PDF Power Tools" action="Semua" onAction={() => go('pdf-tools')} colors={colors} />
-      <View style={{ paddingHorizontal: 18 }}>
-        <View style={{ flexDirection: 'row', flexWrap: 'wrap', marginHorizontal: -6 }}>
-          {quickTools.map((t) => (
-            <View key={t.key} style={{ width: '50%', padding: 6 }}><ToolCard tool={t} colors={colors} /></View>
+      {query ? (
+        <View style={{ paddingHorizontal: 18, marginTop: 16 }}>
+          <Text style={{ color: colors.textMuted, fontSize: 11, fontWeight: '700', marginBottom: 8 }}>{filtered.length} hasil</Text>
+          {filtered.map((doc) => (
+            <DocCard key={doc.id} doc={doc} colors={colors} folderName={folderNameById?.(doc.folderId)} onPress={() => go('detail', { docId: doc.id })} onToggleFav={() => onToggleFav(doc.id)} />
           ))}
         </View>
-      </View>
-
-      <SectionHead title="Dokumen Terbaru" action="Lihat semua" onAction={() => go('documents')} colors={colors} />
-      <View style={{ paddingHorizontal: 18 }}>
-        {recent.length === 0 ? (
-          <Card colors={colors}>
-            <EmptyState icon="document-outline" title="Belum ada dokumen" message="Scan atau impor dokumen pertama Anda." colors={colors} />
-          </Card>
-        ) : (
-          recent.map((doc) => (
-            <DocCard key={doc.id} doc={doc} colors={colors} onPress={() => go('detail', { docId: doc.id })} onToggleFav={() => onToggleFav(doc.id)} />
-          ))
-        )}
-      </View>
-
-      <SectionHead title="Folder" action="Kelola" onAction={() => go('folders')} colors={colors} />
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ paddingHorizontal: 18, paddingTop: 8, paddingBottom: 4 }}>
-        {folders.map((f) => {
-          const count = documents.filter((d) => d.folder === f.name).length;
-          return (
-            <Pressable key={f.id} onPress={() => go('documents', { folder: f.name })} style={{ width: 120, padding: 14, borderRadius: 18, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, marginRight: 10 }}>
-              <View style={{ width: 38, height: 38, borderRadius: 12, backgroundColor: f.color + '22', borderWidth: 1, borderColor: f.color + '44', alignItems: 'center', justifyContent: 'center', marginBottom: 10 }}>
-                <Text style={{ color: f.color, fontWeight: '900', fontSize: 10 }}>{f.glyph}</Text>
+      ) : (
+        <>
+          <View style={{ paddingHorizontal: 18, marginTop: 16 }}>
+            <LinearGradient colors={['rgba(0,242,254,0.16)', 'rgba(59,130,246,0.08)']} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={{ borderRadius: 24, padding: 20, borderWidth: 1, borderColor: colors.borderStrong }}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', alignSelf: 'flex-start', backgroundColor: 'rgba(0,242,254,0.12)', paddingHorizontal: 10, paddingVertical: 4, borderRadius: 20, borderWidth: 1, borderColor: 'rgba(0,242,254,0.28)', marginBottom: 12 }}>
+                <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: colors.emerald, marginRight: 6 }} />
+                <Text style={{ color: colors.cyan, fontSize: 9, fontWeight: '800', letterSpacing: 0.5 }}>AUTO EDGE DETECT</Text>
               </View>
-              <Text style={{ color: colors.text, fontWeight: '800', fontSize: 13 }} numberOfLines={1}>{f.name}</Text>
-              <Text style={{ color: colors.textMuted, fontSize: 10, marginTop: 2 }}>{count} dokumen</Text>
-            </Pressable>
-          );
-        })}
-      </ScrollView>
+              <Text style={{ color: colors.text, fontSize: 17, fontWeight: '800', marginBottom: 6 }}>Mulai Scan Cepat</Text>
+              <Text style={{ color: colors.textMuted, fontSize: 12, marginBottom: 16, lineHeight: 18 }}>Deteksi tepi otomatis, crop perspektif & ekspor PDF instan.</Text>
+              <View style={{ flexDirection: 'row', gap: 8 }}>
+                <Btn label="Scan" icon="scan" colors={colors} onPress={() => go('scanner')} style={{ flex: 1.3 }} />
+                <Btn label="Impor" icon="images-outline" variant="soft" colors={colors} onPress={() => go('scanner', { openGallery: true })} style={{ flex: 1 }} />
+              </View>
+            </LinearGradient>
+          </View>
+
+          <View style={{ paddingHorizontal: 18, marginTop: 18, flexDirection: 'row', gap: 8 }}>
+            <StatBox value={documents.length} label="DOKUMEN" colors={colors} />
+            <StatBox value={totalPages} label="HALAMAN" colors={colors} accent={colors.emerald} />
+            <StatBox value={favCount} label="FAVORIT" colors={colors} accent={colors.amber} />
+          </View>
+
+          <SectionHead title="PDF Power Tools" action="Semua" onAction={() => go('pdf-tools')} colors={colors} />
+          <View style={{ paddingHorizontal: 18 }}>
+            <View style={{ flexDirection: 'row', flexWrap: 'wrap', marginHorizontal: -6 }}>
+              {quickTools.map((t) => (
+                <View key={t.key} style={{ width: '50%', padding: 6 }}><ToolCard tool={t} colors={colors} /></View>
+              ))}
+            </View>
+          </View>
+
+          <SectionHead title="Dokumen Terbaru" action="Lihat semua" onAction={() => go('documents')} colors={colors} />
+          <View style={{ paddingHorizontal: 18 }}>
+            {recent.length === 0 ? (
+              <Card colors={colors}>
+                <EmptyState icon="document-outline" title="Belum ada dokumen" message="Scan atau impor dokumen pertama Anda." colors={colors} />
+              </Card>
+            ) : (
+              recent.map((doc) => (
+                <DocCard key={doc.id} doc={doc} colors={colors} folderName={folderNameById?.(doc.folderId)} onPress={() => go('detail', { docId: doc.id })} onToggleFav={() => onToggleFav(doc.id)} />
+              ))
+            )}
+          </View>
+
+          <SectionHead title="Folder" action="Kelola" onAction={() => go('folders')} colors={colors} />
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ paddingHorizontal: 18, paddingTop: 8, paddingBottom: 4 }}>
+            {folders.map((f) => {
+              const count = documents.filter((d) => d.folderId === f.id).length;
+              return (
+                <Pressable key={f.id} onPress={() => go('documents', { folderId: f.id })} style={{ width: 120, padding: 14, borderRadius: 18, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, marginRight: 10 }}>
+                  <View style={{ width: 38, height: 38, borderRadius: 12, backgroundColor: f.color + '22', borderWidth: 1, borderColor: f.color + '44', alignItems: 'center', justifyContent: 'center', marginBottom: 10 }}>
+                    <Text style={{ color: f.color, fontWeight: '900', fontSize: 10 }}>{f.glyph}</Text>
+                  </View>
+                  <Text style={{ color: colors.text, fontWeight: '800', fontSize: 13 }} numberOfLines={1}>{f.name}</Text>
+                  <Text style={{ color: colors.textMuted, fontSize: 10, marginTop: 2 }}>{count} dokumen</Text>
+                </Pressable>
+              );
+            })}
+          </ScrollView>
+        </>
+      )}
     </ScrollView>
   );
 };
@@ -605,19 +695,19 @@ const ToolCard = ({ tool, colors }) => (
 /* ============================================================
    SCREEN: DOCUMENTS
    ============================================================ */
-const DocumentsScreen = ({ colors, documents, go, onToggleFav, filterFolder, clearFilter, showToast }) => {
+const DocumentsScreen = ({ colors, documents, go, onToggleFav, filterFolderId, folders }) => {
   const [query, setQuery] = useState('');
-  const [activeFolder, setActiveFolder] = useState(filterFolder || 'All');
+  const [activeFolderId, setActiveFolderId] = useState(filterFolderId || 'all');
   const [sort, setSort] = useState('recent');
   const [favOnly, setFavOnly] = useState(false);
 
-  useEffect(() => { if (filterFolder) setActiveFolder(filterFolder); }, [filterFolder]);
+  useEffect(() => { setActiveFolderId(filterFolderId || 'all'); }, [filterFolderId]);
 
-  const folderList = ['All', ...new Set(documents.map((d) => d.folder).filter(Boolean))];
+  const folderNameById = useCallback((id) => folders.find((f) => f.id === id)?.name || 'DOC', [folders]);
 
   const filtered = useMemo(() => {
     let list = documents.slice();
-    if (activeFolder !== 'All') list = list.filter((d) => d.folder === activeFolder);
+    if (activeFolderId !== 'all') list = list.filter((d) => d.folderId === activeFolderId);
     if (favOnly) list = list.filter((d) => d.favorite);
     if (query.trim()) {
       const q = query.toLowerCase();
@@ -625,15 +715,25 @@ const DocumentsScreen = ({ colors, documents, go, onToggleFav, filterFolder, cle
     }
     if (sort === 'name') list.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
     if (sort === 'pages') list.sort((a, b) => (b.pages || 0) - (a.pages || 0));
+    // Fix D12: 'recent' sort by createdAt timestamp
+    if (sort === 'recent') list.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
     return list;
-  }, [documents, activeFolder, favOnly, query, sort]);
+  }, [documents, activeFolderId, favOnly, query, sort]);
 
   return (
     <View style={{ flex: 1 }}>
-      <Header title="Dokumen Saya" subtitle={`${filtered.length} dari ${documents.length} dokumen`} colors={colors} right={<IconPill name={favOnly ? 'star' : 'star-outline'} colors={colors} active={favOnly} onPress={() => setFavOnly((v) => !v)} />} />
+      <Header
+        title="Dokumen Saya"
+        subtitle={`${filtered.length} dari ${documents.length} dokumen`}
+        colors={colors}
+        right={<IconPill name={favOnly ? 'star' : 'star-outline'} colors={colors} active={favOnly} onPress={() => setFavOnly((v) => !v)} />}
+      />
       <View style={{ paddingHorizontal: 16 }}><SearchBar value={query} onChange={setQuery} colors={colors} placeholder="Cari dokumen…" /></View>
       <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ paddingHorizontal: 16, paddingTop: 12, paddingBottom: 4 }}>
-        {folderList.map((f) => (<Chip key={f} label={f} active={activeFolder === f} colors={colors} onPress={() => { setActiveFolder(f); if (f === 'All' && clearFilter) clearFilter(); }} />))}
+        <Chip label="Semua" active={activeFolderId === 'all'} colors={colors} onPress={() => setActiveFolderId('all')} />
+        {folders.map((f) => (
+          <Chip key={f.id} label={f.name} active={activeFolderId === f.id} colors={colors} onPress={() => setActiveFolderId(f.id)} />
+        ))}
       </ScrollView>
       <View style={{ paddingHorizontal: 16, paddingTop: 8, paddingBottom: 4, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
         <Text style={{ color: colors.textMuted, fontSize: 10, fontWeight: '800', letterSpacing: 1 }}>URUTKAN</Text>
@@ -643,7 +743,21 @@ const DocumentsScreen = ({ colors, documents, go, onToggleFav, filterFolder, cle
           <Chip label="Halaman" active={sort === 'pages'} colors={colors} onPress={() => setSort('pages')} />
         </View>
       </View>
-      <FlatList data={filtered} keyExtractor={(it) => it.id} contentContainerStyle={{ paddingHorizontal: 16, paddingTop: 12, paddingBottom: 120 }} ListEmptyComponent={<EmptyState icon="search-outline" title="Tidak ada dokumen" message="Coba ubah kata kunci atau filter folder." colors={colors} />} renderItem={({ item }) => (<DocCard doc={item} colors={colors} onPress={() => go('detail', { docId: item.id })} onToggleFav={() => onToggleFav(item.id)} />)} />
+      <FlatList
+        data={filtered}
+        keyExtractor={(it) => it.id}
+        contentContainerStyle={{ paddingHorizontal: 16, paddingTop: 12, paddingBottom: 120 }}
+        ListEmptyComponent={<EmptyState icon="search-outline" title="Tidak ada dokumen" message="Coba ubah kata kunci atau filter folder." colors={colors} />}
+        renderItem={({ item }) => (
+          <DocCard
+            doc={item}
+            colors={colors}
+            folderName={folderNameById(item.folderId)}
+            onPress={() => go('detail', { docId: item.id })}
+            onToggleFav={() => onToggleFav(item.id)}
+          />
+        )}
+      />
     </View>
   );
 };
@@ -657,10 +771,10 @@ const FoldersScreen = ({ colors, documents, folders, go }) => (
     <ScrollView contentContainerStyle={{ padding: 16, paddingBottom: 120 }}>
       <View style={{ flexDirection: 'row', flexWrap: 'wrap', marginHorizontal: -6 }}>
         {folders.map((f) => {
-          const count = documents.filter((d) => d.folder === f.name).length;
+          const count = documents.filter((d) => d.folderId === f.id).length;
           return (
             <View key={f.id} style={{ width: '50%', padding: 6 }}>
-              <Pressable onPress={() => go('documents', { folder: f.name })} style={{ backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: 18, padding: 16 }}>
+              <Pressable onPress={() => go('documents', { folderId: f.id })} style={{ backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: 18, padding: 16 }}>
                 <View style={{ width: 46, height: 46, borderRadius: 14, backgroundColor: f.color + '22', borderWidth: 1, borderColor: f.color + '44', alignItems: 'center', justifyContent: 'center', marginBottom: 12 }}>
                   <Text style={{ color: f.color, fontWeight: '900', fontSize: 11 }}>{f.glyph}</Text>
                 </View>
@@ -676,11 +790,12 @@ const FoldersScreen = ({ colors, documents, folders, go }) => (
 );
 
 /* ============================================================
-   SCREEN: SETTINGS
+   SCREEN: SETTINGS (Fix F1: PIN user-configurable)
    ============================================================ */
-const SettingsScreen = ({ colors, themeMode, onToggleTheme, appLock, onToggleLock, qualityPreset, compressLevel, go, showToast }) => {
+const SettingsScreen = ({ colors, themeMode, onToggleTheme, appLock, onToggleLock, onChangePin, qualityPreset, go, showToast }) => {
   const preset = QUALITY_PRESETS.find((p) => p.key === qualityPreset) || QUALITY_PRESETS[1];
-  const level = COMPRESS_LEVELS.find((l) => l.key === compressLevel) || COMPRESS_LEVELS[1];
+  const [pinModal, setPinModal] = useState(false);
+  const [newPin, setNewPin] = useState('');
 
   const SettingRow = ({ icon, label, desc, right, onPress }) => (
     <Pressable onPress={onPress} style={{ flexDirection: 'row', alignItems: 'center', paddingHorizontal: 14, paddingVertical: 14, borderBottomWidth: 1, borderBottomColor: colors.divider, gap: 12 }}>
@@ -704,14 +819,7 @@ const SettingsScreen = ({ colors, themeMode, onToggleTheme, appLock, onToggleLoc
       <ScrollView contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 120 }}>
         <GroupTitle>KUALITAS & OUTPUT</GroupTitle>
         <Group>
-          <SettingRow icon="camera-outline" label="Kualitas Scan Default" desc={`${preset.label} — ${preset.dpi || 0} DPI`} onPress={() => go('quality')} right={<Ionicons name="chevron-forward" size={18} color={colors.textDim} />} />
-          <SettingRow icon="contract-outline" label="Level Kompres Default" desc={`${level.label} (~${level.ratio}% lebih kecil)`} onPress={() => showToast('Atur di PDF Tools')} right={<Ionicons name="chevron-forward" size={18} color={colors.textDim} />} />
-        </Group>
-
-        <GroupTitle>AI & OCR</GroupTitle>
-        <Group>
-          <SettingRow icon="sparkles-outline" label="AI Neural Vision" desc="Aktif — akurasi 99.2%" right={<Text style={{ color: colors.cyan, fontSize: 11, fontWeight: '800' }}>ON</Text>} />
-          <SettingRow icon="language-outline" label="Bahasa OCR" desc="Indonesia + English" onPress={() => showToast('Bahasa OCR')} right={<Ionicons name="chevron-forward" size={18} color={colors.textDim} />} />
+          <SettingRow icon="camera-outline" label="Kualitas Scan Default" desc={`${preset.label} — ${preset.res || 'Adaptive'} px`} onPress={() => go('quality')} right={<Ionicons name="chevron-forward" size={18} color={colors.textDim} />} />
         </Group>
 
         <GroupTitle>TAMPILAN</GroupTitle>
@@ -722,17 +830,19 @@ const SettingsScreen = ({ colors, themeMode, onToggleTheme, appLock, onToggleLoc
         <GroupTitle>KEAMANAN</GroupTitle>
         <Group>
           <SettingRow icon="lock-closed-outline" label="Kunci Aplikasi" desc="PIN / Biometrik" right={<Switch value={appLock} onValueChange={onToggleLock} trackColor={{ true: colors.cyan, false: colors.border }} thumbColor="#fff" />} />
+          <SettingRow icon="keypad-outline" label="Ubah PIN" desc="Ganti PIN aplikasi" onPress={() => setPinModal(true)} right={<Ionicons name="chevron-forward" size={18} color={colors.textDim} />} />
         </Group>
 
         <GroupTitle>PENYIMPANAN</GroupTitle>
         <Group>
-          <SettingRow icon="download-outline" label="Lokasi Simpan" desc="Perangkat / Offline" onPress={() => showToast('Lokasi penyimpanan')} right={<Ionicons name="chevron-forward" size={18} color={colors.textDim} />} />
           <SettingRow icon="trash-outline" label="Hapus Cache" desc="Hapus file temporary" onPress={async () => {
             try {
               const cacheDir = FileSystem.cacheDirectory;
               const files = await FileSystem.readDirectoryAsync(cacheDir);
               let n = 0;
-              for (const f of files) { try { await FileSystem.deleteAsync(cacheDir + f, { idempotent: true }); n++; } catch (e) {} }
+              for (const f of files) {
+                try { await FileSystem.deleteAsync(cacheDir + f, { idempotent: true }); n++; } catch (e) {}
+              }
               showToast(`Cache dibersihkan (${n} file)`);
             } catch (e) { showToast('Cache dibersihkan'); }
           }} right={<Ionicons name="chevron-forward" size={18} color={colors.textDim} />} />
@@ -740,9 +850,36 @@ const SettingsScreen = ({ colors, themeMode, onToggleTheme, appLock, onToggleLoc
 
         <GroupTitle>TENTANG</GroupTitle>
         <Group>
-          <SettingRow icon="information-circle-outline" label="Versi Aplikasi" desc="Gandes Scanner 1.0.0" />
+          <SettingRow icon="information-circle-outline" label="Versi Aplikasi" desc="Gandes Scanner 1.1.0" />
         </Group>
       </ScrollView>
+
+      <Modal visible={pinModal} transparent animationType="fade">
+        <View style={{ flex: 1, backgroundColor: colors.overlay, alignItems: 'center', justifyContent: 'center', padding: 24 }}>
+          <View style={{ backgroundColor: colors.surfaceSolid, borderRadius: 18, padding: 18, width: '100%', maxWidth: 340, borderWidth: 1, borderColor: colors.borderStrong }}>
+            <Text style={{ color: colors.text, fontWeight: '800', fontSize: 15, marginBottom: 12 }}>Ubah PIN</Text>
+            <TextInput
+              value={newPin}
+              onChangeText={(t) => setNewPin(t.replace(/[^0-9]/g, '').slice(0, 4))}
+              keyboardType="numeric"
+              secureTextEntry
+              placeholder="4 digit"
+              placeholderTextColor={colors.textDim}
+              style={{ borderWidth: 1, borderColor: colors.border, borderRadius: 12, paddingHorizontal: 12, paddingVertical: 10, color: colors.text, fontSize: 18, textAlign: 'center', letterSpacing: 8 }}
+            />
+            <View style={{ flexDirection: 'row', gap: 10, marginTop: 14 }}>
+              <Btn label="Batal" variant="soft" colors={colors} onPress={() => { setPinModal(false); setNewPin(''); }} style={{ flex: 1 }} />
+              <Btn label="Simpan" colors={colors} onPress={async () => {
+                if (newPin.length !== 4) { showToast('PIN harus 4 digit'); return; }
+                await onChangePin(newPin);
+                setPinModal(false);
+                setNewPin('');
+                showToast('PIN diperbarui');
+              }} style={{ flex: 1 }} />
+            </View>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 };
@@ -750,19 +887,18 @@ const SettingsScreen = ({ colors, themeMode, onToggleTheme, appLock, onToggleLoc
 /* ============================================================
    SCREEN: QUALITY
    ============================================================ */
-const QualityScreen = ({ colors, qualityPreset, setQualityPreset, qualityFormat, setQualityFormat, go, showToast }) => {
+const QualityScreen = ({ colors, qualityPreset, setQualityPreset, go, showToast }) => {
   const preset = QUALITY_PRESETS.find((p) => p.key === qualityPreset) || QUALITY_PRESETS[1];
-  const estMB = 0.7 * preset.sizeMult;
 
   return (
     <View style={{ flex: 1 }}>
-      <Header title="Kualitas Scan" subtitle="Atur resolusi & format output" onBack={() => go('settings')} colors={colors} />
+      <Header title="Kualitas Scan" subtitle="Resolusi output PDF" onBack={() => go('settings')} colors={colors} />
       <ScrollView contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 120 }}>
         <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', backgroundColor: 'rgba(0,242,254,0.08)', borderWidth: 1, borderColor: colors.borderStrong, borderRadius: 16, padding: 14, marginTop: 8 }}>
           <View>
-            <Text style={{ color: colors.cyan, fontSize: 9, fontWeight: '800', letterSpacing: 1 }}>ESTIMASI PER HALAMAN</Text>
-            <Text style={{ color: colors.text, fontSize: 20, fontWeight: '900', marginTop: 4 }}>~{fmtSize(estMB)}</Text>
-            <Text style={{ color: colors.textMuted, fontSize: 10, marginTop: 2 }}>{preset.res || 'Adaptive'} px • {preset.dpi || 'AI'} DPI</Text>
+            <Text style={{ color: colors.cyan, fontSize: 9, fontWeight: '800', letterSpacing: 1 }}>TARGET LEBAR</Text>
+            <Text style={{ color: colors.text, fontSize: 20, fontWeight: '900', marginTop: 4 }}>{preset.res} px</Text>
+            <Text style={{ color: colors.textMuted, fontSize: 10, marginTop: 2 }}>{preset.dpi} DPI equivalent</Text>
           </View>
           <View style={{ width: 46, height: 46, borderRadius: 14, backgroundColor: 'rgba(0,242,254,0.12)', borderWidth: 1, borderColor: 'rgba(0,242,254,0.3)', alignItems: 'center', justifyContent: 'center' }}>
             <Ionicons name="camera-outline" size={22} color={colors.cyan} />
@@ -780,7 +916,7 @@ const QualityScreen = ({ colors, qualityPreset, setQualityPreset, qualityFormat,
                 <Text style={{ color: colors.text, fontSize: 13, fontWeight: '800' }}>{q.label}</Text>
                 {q.tag ? <View style={{ backgroundColor: 'rgba(0,242,254,0.15)', paddingHorizontal: 5, paddingVertical: 1, borderRadius: 4 }}><Text style={{ color: colors.cyan, fontSize: 8, fontWeight: '800' }}>{q.tag}</Text></View> : null}
               </View>
-              <Text style={{ color: colors.textMuted, fontSize: 10, marginTop: 3 }}>{q.res || 'Adaptive'} px • {q.dpi || 'AI'} DPI</Text>
+              <Text style={{ color: colors.textMuted, fontSize: 10, marginTop: 3 }}>{q.res} px • {q.dpi} DPI</Text>
             </View>
             <View style={{ width: 22, height: 22, borderRadius: 11, borderWidth: 2, borderColor: qualityPreset === q.key ? colors.cyan : colors.border, backgroundColor: qualityPreset === q.key ? colors.cyan : 'transparent', alignItems: 'center', justifyContent: 'center' }}>
               {qualityPreset === q.key ? <Ionicons name="checkmark" size={12} color="#050811" /> : null}
@@ -788,13 +924,10 @@ const QualityScreen = ({ colors, qualityPreset, setQualityPreset, qualityFormat,
           </Pressable>
         ))}
 
-        <Text style={{ color: colors.textMuted, fontSize: 10, fontWeight: '800', letterSpacing: 1.2, marginTop: 22, marginBottom: 10, marginLeft: 4 }}>FORMAT OUTPUT</Text>
-        <View style={{ flexDirection: 'row', gap: 10 }}>
-          {['pdf', 'jpg', 'png'].map((f) => (
-            <Pressable key={f} onPress={() => { setQualityFormat(f); showToast(`Format: ${f.toUpperCase()}`); }} style={{ flex: 1, paddingVertical: 12, borderRadius: 12, backgroundColor: qualityFormat === f ? 'rgba(0,242,254,0.12)' : colors.surfaceSoft, borderWidth: 1, borderColor: qualityFormat === f ? colors.cyan : colors.border, alignItems: 'center' }}>
-              <Text style={{ color: qualityFormat === f ? colors.cyan : colors.text, fontWeight: '800', fontSize: 13 }}>{f.toUpperCase()}</Text>
-            </Pressable>
-          ))}
+        <View style={{ marginTop: 20, padding: 14, backgroundColor: colors.surfaceSoft, borderWidth: 1, borderColor: colors.border, borderRadius: 14 }}>
+          <Text style={{ color: colors.textMuted, fontSize: 11, lineHeight: 17 }}>
+            💡 Kualitas lebih tinggi = file lebih besar. Untuk share via chat, pilih Medium. Untuk arsip, pilih HD/Ultra.
+          </Text>
         </View>
       </ScrollView>
     </View>
@@ -808,9 +941,8 @@ const PdfToolsScreen = ({ colors, go }) => {
   const tools = [
     { key: 'merge', label: 'Gabung PDF', desc: 'Satukan beberapa dokumen', icon: 'add-circle-outline', color: colors.cyan },
     { key: 'split', label: 'Pisah PDF', desc: 'Split range / per halaman', icon: 'cut-outline', color: colors.amber },
-    { key: 'compress', label: 'Kompres PDF', desc: 'Hemat hingga 80%', icon: 'contract-outline', color: colors.emerald },
-    { key: 'convert', label: 'Konversi', desc: 'PDF ke JPG, PNG, TXT', icon: 'swap-horizontal-outline', color: colors.violet },
-    { key: 'reorder', label: 'Atur Halaman', desc: 'Urutkan, putar, hapus', icon: 'reorder-four-outline', color: colors.cyan },
+    { key: 'compress', label: 'Kompres PDF', desc: 'Bersihkan metadata', icon: 'contract-outline', color: colors.emerald },
+    { key: 'convert', label: 'Konversi', desc: 'PDF → JPG dari page', icon: 'swap-horizontal-outline', color: colors.violet },
     { key: 'watermark', label: 'Watermark', desc: 'Tambah watermark teks', icon: 'water-outline', color: colors.rose },
   ];
   return (
@@ -836,387 +968,255 @@ const PdfToolsScreen = ({ colors, go }) => {
 };
 
 /* ============================================================
-   SCREEN: SCANNER
+   SCREEN: SCANNER (Fix: pakai DocumentScanner plugin)
    ============================================================ */
-const ScannerScreen = ({ colors, go, qualityPreset, capturedImages, setCapturedImages, showToast, initialParams }) => {
+const ScannerScreen = ({ colors, go, capturedImages, setCapturedImages, showToast, initialParams }) => {
   const insets = useSafeAreaInsets();
-  const cameraRef = useRef(null);
-  const [permission, requestPermission] = useCameraPermissions();
-  const [ready, setReady] = useState(false);
-  const [flash, setFlash] = useState('off');
-  const [facing, setFacing] = useState('back');
-  const [grid, setGrid] = useState(true);
-  const [capturing, setCapturing] = useState(false);
-  const [showGallery, setShowGallery] = useState(false);
-  const [galleryImages, setGalleryImages] = useState([]);
-
-  const preset = QUALITY_PRESETS.find((p) => p.key === qualityPreset) || QUALITY_PRESETS[1];
+  const [scanning, setScanning] = useState(false);
+  const galleryTriggered = useRef(false);
 
   useEffect(() => {
-    (async () => {
-      if (!permission?.granted) {
-        const r = await requestPermission();
-        if (!r.granted) Alert.alert('Izin Kamera', 'Gandes Scanner membutuhkan akses kamera.');
-      }
-    })();
-  }, []);
-
-  useEffect(() => {
-    if (initialParams?.openGallery) setTimeout(() => pickFromGallery(), 400);
+    if (initialParams?.openGallery && !galleryTriggered.current) {
+      galleryTriggered.current = true;
+      setTimeout(() => pickFromGallery(), 400);
+    }
   }, [initialParams]);
 
-  const capture = async () => {
-    if (!cameraRef.current || capturing) return;
+  const startScan = async () => {
+    if (scanning) return;
     try {
-      setCapturing(true);
+      setScanning(true);
       await haptic('medium');
-      const photo = await cameraRef.current.takePictureAsync({ quality: 0.9, skipProcessing: false, exif: false });
-      if (photo?.uri) {
-        setCapturedImages((prev) => [...prev, { id: uid('cap'), uri: photo.uri, width: photo.width, height: photo.height }]);
+
+      const result = await DocumentScanner.scanDocument({
+        maxNumDocuments: 30,
+        letUserAdjustCrop: true,
+      });
+
+      if (result.status === 'success' && result.scannedImages?.length) {
+        // Persist ke documentDirectory
+        const persisted = [];
+        for (const uri of result.scannedImages) {
+          try {
+            const perm = await persistImage(uri, 'scan');
+            persisted.push({ id: uid('scan'), uri: perm });
+          } catch (e) {
+            persisted.push({ id: uid('scan'), uri });
+          }
+        }
+        setCapturedImages((prev) => [...prev, ...persisted]);
         await haptic('success');
-        showToast(`Halaman #${capturedImages.length + 1} dipindai`);
+        showToast(`✓ ${persisted.length} halaman dipindai`);
+        go('enhance');
       }
-    } catch (e) { showToast('Gagal menangkap'); }
-    finally { setCapturing(false); }
+    } catch (e) {
+      console.error('Scan error:', e);
+      showToast('Gagal memindai');
+    } finally {
+      setScanning(false);
+    }
   };
 
   const pickFromGallery = async () => {
     try {
       const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
       if (status !== 'granted') { showToast('Izin galeri dibutuhkan'); return; }
-      const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ImagePicker.MediaTypeOptions.Images, allowsMultipleSelection: true, selectionLimit: 20, quality: 0.9 });
-      if (!result.canceled && result.assets?.length) { setGalleryImages(result.assets); setShowGallery(true); }
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ['images'],
+        allowsMultipleSelection: true,
+        selectionLimit: 20,
+        quality: 0.9,
+      });
+      if (!result.canceled && result.assets?.length) {
+        const persisted = [];
+        for (const a of result.assets) {
+          try {
+            const perm = await persistImage(a.uri, 'gal');
+            persisted.push({ id: uid('gal'), uri: perm, width: a.width, height: a.height });
+          } catch (e) {
+            persisted.push({ id: uid('gal'), uri: a.uri, width: a.width, height: a.height });
+          }
+        }
+        setCapturedImages((prev) => [...prev, ...persisted]);
+        showToast(`${persisted.length} gambar diimpor`);
+        go('enhance');
+      }
     } catch (e) { showToast('Gagal buka galeri'); }
   };
 
-  const confirmGallery = () => {
-    const newItems = galleryImages.map((a) => ({ id: uid('gal'), uri: a.uri, width: a.width, height: a.height }));
-    setCapturedImages((prev) => [...prev, ...newItems]);
-    setShowGallery(false);
-    setGalleryImages([]);
-    showToast(`${newItems.length} gambar diimpor`);
-  };
-
-  const removeThumb = (id) => { setCapturedImages((prev) => prev.filter((p) => p.id !== id)); showToast('Halaman dihapus'); };
-
-  const finishScan = () => {
-    if (!capturedImages.length) { showToast('Ambil minimal 1 halaman'); return; }
-    go('crop');
-  };
-
-  const toggleFlash = () => {
-    const modes = ['off', 'on', 'auto'];
-    const next = modes[(modes.indexOf(flash) + 1) % modes.length];
-    setFlash(next);
-    showToast(`Flash: ${next.toUpperCase()}`);
-  };
-
-  if (!permission) return <View style={{ flex: 1, backgroundColor: '#000', alignItems: 'center', justifyContent: 'center' }}><ActivityIndicator color={colors.cyan} /></View>;
-
-  if (!permission.granted) {
-    return (
-      <View style={{ flex: 1, backgroundColor: '#000', alignItems: 'center', justifyContent: 'center', padding: 24 }}>
-        <Ionicons name="camera-outline" size={64} color={colors.cyan} />
-        <Text style={{ color: '#fff', fontSize: 18, fontWeight: '800', marginTop: 20, textAlign: 'center' }}>Izin Kamera Dibutuhkan</Text>
-        <Text style={{ color: '#94a3b8', fontSize: 13, marginTop: 8, textAlign: 'center', lineHeight: 20 }}>Berikan izin kamera untuk memindai dokumen</Text>
-        <Btn label="Berikan Izin" icon="camera" colors={colors} onPress={requestPermission} style={{ marginTop: 24, width: 200 }} />
-        <Btn label="Kembali" icon="arrow-back" variant="soft" colors={colors} onPress={() => go('home')} style={{ marginTop: 10, width: 200 }} />
-      </View>
-    );
-  }
+  const InfoCard = ({ icon, title, desc }) => (
+    <View style={{ flex: 1, padding: 14, backgroundColor: colors.surface, borderRadius: 14, borderWidth: 1, borderColor: colors.border }}>
+      <Ionicons name={icon} size={20} color={colors.cyan} style={{ marginBottom: 8 }} />
+      <Text style={{ color: colors.text, fontWeight: '800', fontSize: 12 }}>{title}</Text>
+      <Text style={{ color: colors.textMuted, fontSize: 10, marginTop: 2 }}>{desc}</Text>
+    </View>
+  );
 
   return (
-    <View style={{ flex: 1, backgroundColor: '#000' }}>
-      <StatusBar style="light" />
-      <CameraView ref={cameraRef} style={StyleSheet.absoluteFill} facing={facing} flash={flash} onCameraReady={() => setReady(true)} />
-      {grid ? <View pointerEvents="none" style={[StyleSheet.absoluteFill, { opacity: 0.25 }]}><View style={{ flex: 1, borderWidth: 1, borderColor: 'rgba(0,242,254,0.4)', margin: '20%' }} /></View> : null}
-
-      <View style={{ paddingTop: insets.top + 8, paddingHorizontal: 16, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', zIndex: 10 }}>
-        <Pressable onPress={() => go('home')} style={circleBtnStyle}><Ionicons name="close" size={22} color="#fff" /></Pressable>
-        <View style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: 'rgba(15,23,42,0.75)', borderWidth: 1, borderColor: 'rgba(0,242,254,0.4)', paddingHorizontal: 14, paddingVertical: 6, borderRadius: 24 }}>
-          <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: '#10b981', marginRight: 6 }} />
-          <Text style={{ color: '#94a3b8', fontSize: 10, fontWeight: '700', fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace' }}>AUTOFOCUS <Text style={{ color: colors.cyan }}>{preset.dpi || 'AI'} {preset.dpi ? 'DPI' : ''}</Text></Text>
-        </View>
-        <View style={{ flexDirection: 'row', gap: 8 }}>
-          <Pressable onPress={toggleFlash} style={[circleBtnStyle, flash !== 'off' && { backgroundColor: colors.cyan }]}>
-            <Ionicons name={flash === 'off' ? 'flash-off' : 'flash'} size={18} color={flash !== 'off' ? '#050811' : '#fff'} />
-          </Pressable>
-          <Pressable onPress={() => setGrid((g) => !g)} style={[circleBtnStyle, grid && { backgroundColor: colors.cyan }]}>
-            <Ionicons name="grid-outline" size={18} color={grid ? '#050811' : '#fff'} />
-          </Pressable>
-        </View>
-      </View>
-
-      <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', padding: 20 }}>
-        <View style={{ width: '82%', aspectRatio: 0.72, maxHeight: '55%', borderRadius: 20, borderWidth: 2, borderColor: 'rgba(0,242,254,0.5)', position: 'relative' }}>
-          <View style={[cornerStyle, { top: -2, left: -2, borderTopWidth: 4, borderLeftWidth: 4, borderTopLeftRadius: 12 }]} />
-          <View style={[cornerStyle, { top: -2, right: -2, borderTopWidth: 4, borderRightWidth: 4, borderTopRightRadius: 12 }]} />
-          <View style={[cornerStyle, { bottom: -2, left: -2, borderBottomWidth: 4, borderLeftWidth: 4, borderBottomLeftRadius: 12 }]} />
-          <View style={[cornerStyle, { bottom: -2, right: -2, borderBottomWidth: 4, borderRightWidth: 4, borderBottomRightRadius: 12 }]} />
-        </View>
-      </View>
-
-      <View style={{ flexDirection: 'row', justifyContent: 'center', gap: 8, paddingHorizontal: 16, paddingBottom: 12, zIndex: 10 }}>
-        {['Dokumen', 'KTP / ID', 'Buku'].map((m, i) => (
-          <Pressable key={m} style={{ paddingVertical: 7, paddingHorizontal: 14, borderRadius: 20, backgroundColor: i === 0 ? 'rgba(0,242,254,0.15)' : 'rgba(255,255,255,0.05)', borderWidth: 1, borderColor: i === 0 ? colors.cyan : 'rgba(255,255,255,0.08)' }}>
-            <Text style={{ color: i === 0 ? colors.cyan : '#94a3b8', fontSize: 11, fontWeight: '700' }}>{m}</Text>
-          </Pressable>
-        ))}
-      </View>
-
-      <View style={{ backgroundColor: 'rgba(7,10,18,0.9)', borderTopWidth: 1, borderTopColor: 'rgba(255,255,255,0.08)', paddingHorizontal: 20, paddingTop: 16, paddingBottom: insets.bottom + 16 }}>
-        <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
-          <Pressable onPress={pickFromGallery} style={{ width: 52, height: 52, borderRadius: 16, backgroundColor: 'rgba(255,255,255,0.08)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.12)', alignItems: 'center', justifyContent: 'center' }}>
-            <Ionicons name="images-outline" size={22} color="#fff" />
-          </Pressable>
-          <Pressable onPress={capture} disabled={capturing || !ready}>
-            <View style={{ width: 82, height: 82, borderRadius: 41, borderWidth: 4, borderColor: 'rgba(0,242,254,0.7)', alignItems: 'center', justifyContent: 'center', opacity: !ready || capturing ? 0.5 : 1 }}>
-              <View style={{ width: 62, height: 62, borderRadius: 31, backgroundColor: '#fff', alignItems: 'center', justifyContent: 'center' }}>
-                {capturing ? <ActivityIndicator color="#050811" /> : null}
-              </View>
+    <View style={{ flex: 1, backgroundColor: colors.bg, paddingTop: insets.top }}>
+      <StatusBar style={colors.text === '#f8fafc' ? 'light' : 'dark'} />
+      <Header title="Scan Dokumen" subtitle="Auto Edge Detection" onBack={() => go('home')} colors={colors} />
+      <ScrollView contentContainerStyle={{ padding: 20, paddingBottom: 120 }}>
+        <LinearGradient
+          colors={['rgba(0,242,254,0.16)', 'rgba(59,130,246,0.08)']}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 1 }}
+          style={{ borderRadius: 24, padding: 22, borderWidth: 1, borderColor: colors.borderStrong, marginBottom: 20 }}
+        >
+          <View style={{ alignItems: 'center', marginBottom: 20 }}>
+            <View style={{ width: 80, height: 80, borderRadius: 24, backgroundColor: 'rgba(0,242,254,0.15)', borderWidth: 2, borderColor: colors.cyan, alignItems: 'center', justifyContent: 'center', marginBottom: 16 }}>
+              <Ionicons name="scan" size={40} color={colors.cyan} />
             </View>
-          </Pressable>
-          <Pressable onPress={finishScan} style={{ width: 52, height: 52, borderRadius: 16, backgroundColor: capturedImages.length ? colors.cyan : 'rgba(0,242,254,0.1)', borderWidth: 1.5, borderColor: colors.cyan, alignItems: 'center', justifyContent: 'center' }}>
-            <Text style={{ color: capturedImages.length ? '#050811' : colors.cyan, fontWeight: '800', fontSize: 15 }}>{capturedImages.length}</Text>
-          </Pressable>
+            <Text style={{ color: colors.text, fontSize: 20, fontWeight: '800', marginBottom: 8, textAlign: 'center' }}>
+              Auto Scan Pinggir
+            </Text>
+            <Text style={{ color: colors.textMuted, fontSize: 13, textAlign: 'center', lineHeight: 20 }}>
+              Deteksi tepi otomatis, crop perspektif, hasil rata. Support buku, KTP, invoice, catatan.
+            </Text>
+          </View>
+
+          <Btn
+            label={scanning ? 'Membuka scanner…' : 'Mulai Scan'}
+            icon="scan"
+            colors={colors}
+            onPress={startScan}
+            disabled={scanning}
+            style={{ marginBottom: 10 }}
+          />
+          <Btn
+            label="Impor dari Galeri"
+            icon="images-outline"
+            variant="soft"
+            colors={colors}
+            onPress={pickFromGallery}
+          />
+        </LinearGradient>
+
+        <View style={{ flexDirection: 'row', gap: 10, marginBottom: 10 }}>
+          <InfoCard icon="crop-outline" title="Auto Crop" desc="Pinggir terdeteksi" />
+          <InfoCard icon="cube-outline" title="Perspektif" desc="Miring jadi rata" />
         </View>
+        <View style={{ flexDirection: 'row', gap: 10 }}>
+          <InfoCard icon="book-outline" title="Multi Page" desc="Hingga 30 halaman" />
+          <InfoCard icon="shield-checkmark-outline" title="Offline" desc="Data tetap lokal" />
+        </View>
+
         {capturedImages.length > 0 ? (
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ paddingTop: 12 }}>
-            {capturedImages.map((p) => (
-              <View key={p.id} style={{ width: 46, height: 58, borderRadius: 8, marginRight: 8, overflow: 'hidden', borderWidth: 1.5, borderColor: 'rgba(0,242,254,0.6)' }}>
-                <Image source={{ uri: p.uri }} style={{ width: '100%', height: '100%' }} />
-                <Pressable onPress={() => removeThumb(p.id)} style={{ position: 'absolute', top: -6, right: -6, width: 16, height: 16, borderRadius: 8, backgroundColor: colors.rose, alignItems: 'center', justifyContent: 'center' }}>
-                  <Ionicons name="close" size={10} color="#fff" />
-                </Pressable>
-              </View>
-            ))}
-          </ScrollView>
-        ) : null}
-      </View>
-
-      <Modal visible={showGallery} transparent animationType="slide">
-        <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.9)', justifyContent: 'flex-end' }}>
-          <View style={{ backgroundColor: colors.surfaceSolid, borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 20, paddingBottom: insets.bottom + 20, maxHeight: '80%' }}>
-            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-              <Text style={{ color: colors.text, fontWeight: '800', fontSize: 16 }}>Pilih Gambar ({galleryImages.length})</Text>
-              <Pressable onPress={() => setShowGallery(false)}><Ionicons name="close" size={22} color={colors.textMuted} /></Pressable>
-            </View>
-            <FlatList data={galleryImages} keyExtractor={(it) => it.assetId || it.uri} numColumns={3} renderItem={({ item }) => (<View style={{ flex: 1, aspectRatio: 1, padding: 3 }}><Image source={{ uri: item.uri }} style={{ flex: 1, borderRadius: 8 }} /></View>)} style={{ maxHeight: 400 }} />
-            <View style={{ flexDirection: 'row', gap: 10, marginTop: 16 }}>
-              <Btn label="Batal" variant="soft" colors={colors} onPress={() => setShowGallery(false)} style={{ flex: 1 }} />
-              <Btn label={`Impor ${galleryImages.length} Gambar`} colors={colors} onPress={confirmGallery} style={{ flex: 1.5 }} />
+          <View style={{ marginTop: 20, padding: 16, backgroundColor: colors.surface, borderRadius: 16, borderWidth: 1, borderColor: colors.borderStrong }}>
+            <Text style={{ color: colors.text, fontWeight: '700', marginBottom: 12 }}>
+              {capturedImages.length} halaman siap diproses
+            </Text>
+            <View style={{ flexDirection: 'row', gap: 8 }}>
+              <Btn label="Lanjut Enhance" colors={colors} onPress={() => go('enhance')} style={{ flex: 1 }} />
+              <Btn label="Bersihkan" variant="soft" colors={colors} onPress={() => setCapturedImages([])} style={{ flex: 0.6 }} />
             </View>
           </View>
-        </View>
-      </Modal>
+        ) : null}
+      </ScrollView>
     </View>
   );
 };
 
 /* ============================================================
-   SCREEN: CROP
-   ============================================================ */
-const CropScreen = ({ colors, go, capturedImages, setCapturedImages, showToast }) => {
-  const insets = useSafeAreaInsets();
-  const [currentIdx, setCurrentIdx] = useState(0);
-  const [rotation, setRotation] = useState(0);
-  const [processing, setProcessing] = useState(false);
-  const current = capturedImages[currentIdx];
-
-  if (!current) {
-    return (
-      <View style={{ flex: 1, backgroundColor: '#000', alignItems: 'center', justifyContent: 'center' }}>
-        <Text style={{ color: '#fff' }}>Tidak ada gambar</Text>
-        <Btn label="Kembali" colors={colors} onPress={() => go('scanner')} style={{ marginTop: 20, width: 200 }} />
-      </View>
-    );
-  }
-
-  const rotate = () => { setRotation((r) => (r + 90) % 360); haptic('light'); };
-  const reset = () => { setRotation(0); haptic('light'); };
-
-  const applyAndNext = async () => {
-    if (rotation === 0) {
-      if (currentIdx < capturedImages.length - 1) { setCurrentIdx((i) => i + 1); setRotation(0); }
-      else go('enhance');
-      return;
-    }
-    try {
-      setProcessing(true);
-      await haptic('medium');
-      const manipResult = await ImageManipulator.manipulateAsync(current.uri, [{ rotate: rotation }], { compress: 0.95, format: ImageManipulator.SaveFormat.JPEG });
-      setCapturedImages((prev) => prev.map((p, i) => (i === currentIdx ? { ...p, uri: manipResult.uri, width: manipResult.width, height: manipResult.height } : p)));
-      showToast('Rotasi diterapkan');
-      if (currentIdx < capturedImages.length - 1) { setCurrentIdx((i) => i + 1); setRotation(0); }
-      else go('enhance');
-    } catch (e) { showToast('Gagal rotate'); }
-    finally { setProcessing(false); }
-  };
-
-  return (
-    <View style={{ flex: 1, backgroundColor: '#000' }}>
-      <StatusBar style="light" />
-      <View style={{ paddingTop: insets.top + 8, paddingHorizontal: 16, paddingBottom: 12, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
-        <Pressable onPress={() => go('scanner')} style={circleBtnStyle}><Ionicons name="close" size={20} color="#fff" /></Pressable>
-        <View style={{ alignItems: 'center' }}>
-          <Text style={{ color: '#fff', fontWeight: '800', fontSize: 15 }}>Crop & Rotate</Text>
-          <Text style={{ color: colors.cyan, fontSize: 10, fontWeight: '700', marginTop: 2 }}>{currentIdx + 1} / {capturedImages.length}</Text>
-        </View>
-        <Pressable onPress={applyAndNext} disabled={processing} style={{ paddingHorizontal: 14, paddingVertical: 10, borderRadius: 12, backgroundColor: '#fff', flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-          {processing ? <ActivityIndicator size="small" color="#000" /> : null}
-          <Text style={{ color: '#000', fontWeight: '800', fontSize: 13 }}>{currentIdx < capturedImages.length - 1 ? 'Next' : 'Selesai'}</Text>
-        </Pressable>
-      </View>
-
-      <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', padding: 20 }}>
-        <View style={{ width: '78%', aspectRatio: 0.76, maxHeight: '55%', transform: [{ rotate: `${rotation}deg` }] }}>
-          <Image source={{ uri: current.uri }} style={{ width: '100%', height: '100%', borderRadius: 8 }} resizeMode="contain" />
-          <View pointerEvents="none" style={{ position: 'absolute', top: -10, left: -10, right: -10, bottom: -10, borderWidth: 2, borderColor: 'rgba(255,255,255,0.9)', borderRadius: 12 }} />
-          {['tl', 'tr', 'bl', 'br'].map((p) => (
-            <View key={p} style={[{ position: 'absolute', width: 22, height: 22, backgroundColor: '#fff', borderRadius: 4 }, p === 'tl' && { top: -16, left: -16 }, p === 'tr' && { top: -16, right: -16 }, p === 'bl' && { bottom: -16, left: -16 }, p === 'br' && { bottom: -16, right: -16 }]} />
-          ))}
-        </View>
-      </View>
-
-      {capturedImages.length > 1 ? (
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ paddingHorizontal: 20, paddingBottom: 8 }}>
-          {capturedImages.map((p, i) => (
-            <Pressable key={p.id} onPress={() => { setCurrentIdx(i); setRotation(0); }} style={{ width: 44, height: 56, borderRadius: 8, marginRight: 8, overflow: 'hidden', borderWidth: 2, borderColor: i === currentIdx ? colors.cyan : 'rgba(255,255,255,0.2)' }}>
-              <Image source={{ uri: p.uri }} style={{ width: '100%', height: '100%' }} />
-            </Pressable>
-          ))}
-        </ScrollView>
-      ) : null}
-
-      <View style={{ flexDirection: 'row', justifyContent: 'space-around', paddingHorizontal: 20, paddingBottom: insets.bottom + 20 }}>
-        <ToolBtn icon="refresh-outline" label="Putar" onPress={rotate} colors={colors} />
-        <ToolBtn icon="grid-outline" label="Auto" onPress={() => showToast('Crop otomatis')} colors={colors} />
-        <ToolBtn icon="reload-outline" label="Reset" onPress={reset} colors={colors} />
-        <ToolBtn icon="checkmark-outline" label="Selesai" onPress={applyAndNext} colors={colors} active />
-      </View>
-    </View>
-  );
-};
-
-const ToolBtn = ({ icon, label, onPress, colors, active }) => (
-  <Pressable onPress={onPress} style={{ alignItems: 'center', padding: 6 }}>
-    <View style={{ width: 48, height: 48, borderRadius: 14, backgroundColor: active ? colors.cyan : 'rgba(255,255,255,0.12)', alignItems: 'center', justifyContent: 'center' }}>
-      <Ionicons name={icon} size={20} color={active ? '#050811' : '#fff'} />
-    </View>
-    <Text style={{ color: '#fff', fontSize: 10, fontWeight: '700', marginTop: 6 }}>{label}</Text>
-  </Pressable>
-);
-
-/* ============================================================
-   SCREEN: ENHANCE
+   SCREEN: ENHANCE (Fix: honest, tidak klaim filter yang tidak diterapkan)
    ============================================================ */
 const EnhanceScreen = ({ colors, go, capturedImages, setCapturedImages, qualityPreset, showToast, onSaveDocument }) => {
   const insets = useSafeAreaInsets();
-  const [filter, setFilter] = useState('auto');
-  const [brightness, setBrightness] = useState(0);
-  const [contrast, setContrast] = useState(0);
   const [processing, setProcessing] = useState(false);
   const [previewIdx, setPreviewIdx] = useState(0);
   const current = capturedImages[previewIdx];
 
   if (!current) {
     return (
-      <View style={{ flex: 1, backgroundColor: '#000', alignItems: 'center', justifyContent: 'center' }}>
-        <Text style={{ color: '#fff' }}>Tidak ada gambar</Text>
-        <Btn label="Kembali" colors={colors} onPress={() => go('crop')} style={{ marginTop: 20, width: 200 }} />
+      <View style={{ flex: 1, backgroundColor: colors.bg }}>
+        <Header title="Enhance" onBack={() => go('scanner')} colors={colors} />
+        <EmptyState icon="images-outline" title="Tidak ada gambar" message="Scan dulu untuk mulai." colors={colors} action={<Btn label="Buka Scanner" colors={colors} onPress={() => go('scanner')} style={{ marginTop: 16 }} />} />
       </View>
     );
   }
 
-  const previewBg = FILTERS.find((f) => f.key === filter)?.bg || '#FBFBF8';
-  const brightnessOverlay = Math.max(0, brightness) * 0.05;
-
   const applyEnhancements = async () => {
+    if (processing) return;
     try {
       setProcessing(true);
       await haptic('medium');
       const preset = QUALITY_PRESETS.find((p) => p.key === qualityPreset) || QUALITY_PRESETS[1];
       const targetRes = preset.res || 2000;
       const newImages = [];
+
       for (let i = 0; i < capturedImages.length; i++) {
         const img = capturedImages[i];
         const actions = [];
-        if (img.width && img.width > targetRes) actions.push({ resize: { width: targetRes } });
-        const result = await ImageManipulator.manipulateAsync(img.uri, actions, { compress: preset.key === 'compact' ? 0.55 : preset.key === 'medium' ? 0.7 : 0.85, format: ImageManipulator.SaveFormat.JPEG });
-        newImages.push({ ...img, uri: result.uri, width: result.width, height: result.height, filter });
+        // Get current width, resize kalau lebih besar
+        if (img.width && img.width > targetRes) {
+          actions.push({ resize: { width: targetRes } });
+        }
+        const result = await ImageManipulator.manipulateAsync(img.uri, actions, {
+          compress: preset.key === 'compact' ? 0.6 : preset.key === 'medium' ? 0.75 : 0.9,
+          format: ImageManipulator.SaveFormat.JPEG,
+        });
+        // Persist hasil resize
+        let finalUri = result.uri;
+        try {
+          finalUri = await persistImage(result.uri, 'enh');
+        } catch (e) {}
+        newImages.push({ ...img, uri: finalUri, width: result.width, height: result.height });
       }
+
       setCapturedImages(newImages);
       await haptic('success');
-      showToast('Enhancement diterapkan');
-      if (onSaveDocument) await onSaveDocument(newImages);
-    } catch (e) { showToast('Gagal memproses'); }
-    finally { setProcessing(false); }
+      await onSaveDocument(newImages);
+    } catch (e) {
+      console.error(e);
+      showToast('Gagal memproses');
+    } finally {
+      setProcessing(false);
+    }
   };
 
   return (
-    <View style={{ flex: 1, backgroundColor: '#000' }}>
-      <StatusBar style="light" />
+    <View style={{ flex: 1, backgroundColor: colors.bg }}>
+      <StatusBar style={colors.text === '#f8fafc' ? 'light' : 'dark'} />
       <View style={{ paddingTop: insets.top + 8, paddingHorizontal: 16, paddingBottom: 12, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
-        <Pressable onPress={() => go('crop')} style={circleBtnStyle}><Ionicons name="chevron-back" size={22} color="#fff" /></Pressable>
-        <Text style={{ color: '#fff', fontWeight: '800', fontSize: 15 }}>Enhance</Text>
-        <Pressable onPress={applyEnhancements} disabled={processing} style={{ paddingHorizontal: 14, paddingVertical: 10, borderRadius: 12, backgroundColor: '#fff', flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-          {processing ? <ActivityIndicator size="small" color="#000" /> : null}
-          <Text style={{ color: '#000', fontWeight: '800', fontSize: 13 }}>Simpan</Text>
+        <Pressable onPress={() => go('scanner')} style={[circleBtnStyle, { backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border }]}>
+          <Ionicons name="chevron-back" size={22} color={colors.text} />
+        </Pressable>
+        <View style={{ alignItems: 'center' }}>
+          <Text style={{ color: colors.text, fontWeight: '800', fontSize: 15 }}>Preview & Simpan</Text>
+          <Text style={{ color: colors.cyan, fontSize: 10, fontWeight: '700', marginTop: 2 }}>{previewIdx + 1} / {capturedImages.length}</Text>
+        </View>
+        <Pressable onPress={applyEnhancements} disabled={processing} style={{ paddingHorizontal: 14, paddingVertical: 10, borderRadius: 12, backgroundColor: colors.cyan, flexDirection: 'row', alignItems: 'center', gap: 6, opacity: processing ? 0.5 : 1 }}>
+          {processing ? <ActivityIndicator size="small" color="#050811" /> : <Ionicons name="checkmark" size={16} color="#050811" />}
+          <Text style={{ color: '#050811', fontWeight: '800', fontSize: 13 }}>Simpan</Text>
         </Pressable>
       </View>
 
       <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', padding: 20 }}>
-        <View style={{ width: '72%', aspectRatio: 0.76, maxHeight: '52%', borderRadius: 10, overflow: 'hidden', position: 'relative' }}>
+        <View style={{ width: '82%', aspectRatio: 0.72, maxHeight: '60%', borderRadius: 12, overflow: 'hidden', backgroundColor: colors.surfaceSoft, borderWidth: 1, borderColor: colors.border }}>
           <Image source={{ uri: current.uri }} style={{ width: '100%', height: '100%' }} resizeMode="contain" />
-          <View pointerEvents="none" style={[StyleSheet.absoluteFill, { backgroundColor: previewBg, opacity: 0.25 }]} />
-          {brightnessOverlay > 0 ? <View pointerEvents="none" style={[StyleSheet.absoluteFill, { backgroundColor: '#fff', opacity: brightnessOverlay }]} /> : null}
         </View>
       </View>
 
       {capturedImages.length > 1 ? (
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ paddingHorizontal: 20, paddingBottom: 8 }}>
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ paddingHorizontal: 20, paddingBottom: 12 }}>
           {capturedImages.map((p, i) => (
-            <Pressable key={p.id} onPress={() => setPreviewIdx(i)} style={{ width: 44, height: 56, borderRadius: 8, marginRight: 8, overflow: 'hidden', borderWidth: 2, borderColor: i === previewIdx ? colors.cyan : 'rgba(255,255,255,0.2)' }}>
+            <Pressable key={p.id} onPress={() => setPreviewIdx(i)} style={{ width: 50, height: 64, borderRadius: 8, marginRight: 8, overflow: 'hidden', borderWidth: 2, borderColor: i === previewIdx ? colors.cyan : colors.border }}>
               <Image source={{ uri: p.uri }} style={{ width: '100%', height: '100%' }} />
             </Pressable>
           ))}
         </ScrollView>
       ) : null}
 
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 10 }}>
-        {FILTERS.map((f) => (
-          <Pressable key={f.key} onPress={() => { setFilter(f.key); haptic('light'); }} style={{ marginRight: 10, alignItems: 'center' }}>
-            <View style={{ width: 58, height: 58, borderRadius: 14, borderWidth: 2, borderColor: filter === f.key ? colors.cyan : 'transparent', padding: 3 }}>
-              <View style={{ flex: 1, borderRadius: 10, backgroundColor: f.bg }} />
-            </View>
-            <Text style={{ color: filter === f.key ? colors.cyan : 'rgba(255,255,255,0.55)', fontSize: 10, fontWeight: '700', marginTop: 6 }}>{f.label}</Text>
-          </Pressable>
-        ))}
-      </ScrollView>
-
-      <View style={{ paddingHorizontal: 20, paddingBottom: insets.bottom + 16 }}>
-        <Adjuster label="Brightness" value={brightness} onChange={setBrightness} colors={colors} />
-        <View style={{ height: 10 }} />
-        <Adjuster label="Contrast" value={contrast} onChange={setContrast} colors={colors} />
+      <View style={{ paddingHorizontal: 20, paddingBottom: insets.bottom + 20 }}>
+        <View style={{ padding: 12, backgroundColor: colors.surfaceSoft, borderRadius: 12, borderWidth: 1, borderColor: colors.border }}>
+          <Text style={{ color: colors.textMuted, fontSize: 11, lineHeight: 17 }}>
+            ℹ️ Simpan akan meng-crop & kompres tiap halaman sesuai preset kualitas ({QUALITY_PRESETS.find(p => p.key === qualityPreset)?.label || 'HD'}) lalu membuat PDF.
+          </Text>
+        </View>
       </View>
     </View>
   );
 };
-
-const Adjuster = ({ label, value, onChange, colors }) => (
-  <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-    <Text style={{ color: 'rgba(255,255,255,0.75)', fontSize: 11, fontWeight: '700', width: 78 }}>{label}</Text>
-    <Pressable onPress={() => onChange(Math.max(-3, value - 1))} style={{ width: 32, height: 32, borderRadius: 10, backgroundColor: 'rgba(255,255,255,0.14)', alignItems: 'center', justifyContent: 'center' }}>
-      <Ionicons name="remove" size={16} color="#fff" />
-    </Pressable>
-    <View style={{ flex: 1, height: 6, backgroundColor: 'rgba(255,255,255,0.15)', borderRadius: 3, marginHorizontal: 12, overflow: 'hidden' }}>
-      <View style={{ width: `${((value + 3) / 6) * 100}%`, height: 6, borderRadius: 3, backgroundColor: colors.cyan }} />
-    </View>
-    <Pressable onPress={() => onChange(Math.min(3, value + 1))} style={{ width: 32, height: 32, borderRadius: 10, backgroundColor: 'rgba(255,255,255,0.14)', alignItems: 'center', justifyContent: 'center' }}>
-      <Ionicons name="add" size={16} color="#fff" />
-    </Pressable>
-  </View>
-);
 
 /* ============================================================
    SCREEN: PREVIEW
@@ -1230,42 +1230,38 @@ const PreviewScreen = ({ colors, go, currentDoc, showToast }) => {
       </View>
     );
   }
-  const pages = currentDoc.pageImages || Array.from({ length: currentDoc.pages || 1 }).map((_, i) => null);
+  const pageImages = currentDoc.pageImages || [];
+
+  const share = async () => {
+    try {
+      if (currentDoc.pdfUri && (await Sharing.isAvailableAsync())) await Sharing.shareAsync(currentDoc.pdfUri);
+      else showToast('Tidak bisa share');
+    } catch (e) { showToast('Gagal berbagi'); }
+  };
 
   return (
     <View style={{ flex: 1 }}>
       <Header title={currentDoc.name} subtitle={`${currentDoc.pages} halaman • ${currentDoc.sizeStr}`} onBack={() => go('detail', { docId: currentDoc.id })} colors={colors}
-        right={<IconPill name="share-outline" colors={colors} onPress={async () => {
-          try { if (currentDoc.pdfUri && (await Sharing.isAvailableAsync())) await Sharing.shareAsync(currentDoc.pdfUri); else showToast('Bagikan dokumen'); }
-          catch (e) { showToast('Gagal berbagi'); }
-        }} />}
+        right={<IconPill name="share-outline" colors={colors} onPress={share} />}
       />
       <ScrollView contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 120 }}>
-        {pages.map((imgUri, idx) => (
-          <View key={idx} style={{ backgroundColor: '#fff', borderRadius: 12, padding: 8, marginBottom: 14, shadowColor: '#000', shadowOpacity: 0.2, shadowRadius: 12, shadowOffset: { width: 0, height: 6 }, elevation: 3 }}>
-            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10, paddingHorizontal: 4 }}>
-              <Text style={{ color: '#94a3b8', fontSize: 9, fontWeight: '800', letterSpacing: 1 }}>HALAMAN {idx + 1} / {currentDoc.pages}</Text>
-              <View style={{ backgroundColor: '#f1f5f9', paddingHorizontal: 8, paddingVertical: 3, borderRadius: 5 }}><Text style={{ color: '#475569', fontSize: 9, fontWeight: '800' }}>PDF</Text></View>
-            </View>
-            {imgUri ? <Image source={{ uri: imgUri }} style={{ width: '100%', aspectRatio: 0.72, borderRadius: 6 }} resizeMode="contain" /> : (
-              <View style={{ padding: 20 }}>
-                <Text style={{ color: '#111', fontSize: 14, fontWeight: '900', marginBottom: 10 }}>{currentDoc.name}</Text>
-                <Text style={{ color: '#374151', fontSize: 12, lineHeight: 20 }}>{(currentDoc.ocr || 'Preview halaman…').split('\n').slice(0, 8).join('\n')}</Text>
+        {pageImages.length > 0 ? (
+          pageImages.map((imgUri, idx) => (
+            <View key={idx} style={{ backgroundColor: '#fff', borderRadius: 12, padding: 8, marginBottom: 14, shadowColor: '#000', shadowOpacity: 0.2, shadowRadius: 12, shadowOffset: { width: 0, height: 6 }, elevation: 3 }}>
+              <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10, paddingHorizontal: 4 }}>
+                <Text style={{ color: '#94a3b8', fontSize: 9, fontWeight: '800', letterSpacing: 1 }}>HALAMAN {idx + 1} / {pageImages.length}</Text>
+                <View style={{ backgroundColor: '#f1f5f9', paddingHorizontal: 8, paddingVertical: 3, borderRadius: 5 }}><Text style={{ color: '#475569', fontSize: 9, fontWeight: '800' }}>PDF</Text></View>
               </View>
-            )}
-          </View>
-        ))}
-        <View style={{ flexDirection: 'row', gap: 10, marginTop: 6 }}>
-          <Btn label="OCR Teks" icon="text-outline" variant="soft" colors={colors} onPress={() => go('ocr', { docId: currentDoc.id })} style={{ flex: 1 }} />
-          <Btn label="Tanda Tangan" icon="create-outline" variant="soft" colors={colors} onPress={() => go('signature', { docId: currentDoc.id })} style={{ flex: 1 }} />
-        </View>
-        <View style={{ height: 10 }} />
-        <Btn label="Anotasi" icon="brush-outline" variant="soft" colors={colors} onPress={() => go('annotation', { docId: currentDoc.id })} />
-        <View style={{ height: 10 }} />
-        <Btn label="Bagikan PDF" icon="share-social-outline" colors={colors} onPress={async () => {
-          try { if (currentDoc.pdfUri && (await Sharing.isAvailableAsync())) await Sharing.shareAsync(currentDoc.pdfUri); else showToast('Bagikan dokumen…'); }
-          catch (e) { showToast('Gagal berbagi'); }
-        }} />
+              <Image source={{ uri: imgUri }} style={{ width: '100%', aspectRatio: 0.72, borderRadius: 6 }} resizeMode="contain" />
+            </View>
+          ))
+        ) : (
+          <Card colors={colors}>
+            <EmptyState icon="images-outline" title="Preview tidak tersedia" message="Dokumen ini tidak punya page image (mungkin hasil merge/split)." colors={colors} />
+          </Card>
+        )}
+
+        <Btn label="Bagikan PDF" icon="share-social-outline" colors={colors} onPress={share} style={{ marginTop: 6 }} />
       </ScrollView>
     </View>
   );
@@ -1274,7 +1270,7 @@ const PreviewScreen = ({ colors, go, currentDoc, showToast }) => {
 /* ============================================================
    SCREEN: DETAIL
    ============================================================ */
-const DetailScreen = ({ colors, go, currentDoc, onToggleFav, onRename, onDelete, onDeletePage, onAddPage, showToast }) => {
+const DetailScreen = ({ colors, go, currentDoc, folders, onToggleFav, onRename, onDelete, onDeletePage, onAddPage, showToast }) => {
   const [tab, setTab] = useState('pages');
   const [renameOpen, setRenameOpen] = useState(false);
   const [newName, setNewName] = useState(currentDoc?.name || '');
@@ -1288,17 +1284,14 @@ const DetailScreen = ({ colors, go, currentDoc, onToggleFav, onRename, onDelete,
     );
   }
 
-  const tabs = [{ k: 'pages', l: 'Halaman' }, { k: 'ocr', l: 'OCR' }, { k: 'info', l: 'Info' }];
+  const folderName = folders.find((f) => f.id === currentDoc.folderId)?.name || '—';
+  const tabs = [{ k: 'pages', l: 'Halaman' }, { k: 'info', l: 'Info' }];
   const quickActions = [
     { k: 'preview', i: 'document-text-outline', l: 'Preview PDF', a: () => go('preview', { docId: currentDoc.id }) },
-    { k: 'ocr', i: 'text-outline', l: 'OCR Teks', a: () => go('ocr', { docId: currentDoc.id }) },
     { k: 'merge', i: 'add-circle-outline', l: 'Gabung', a: () => go('merge', { selectedId: currentDoc.id }) },
     { k: 'split', i: 'cut-outline', l: 'Pisah', a: () => go('split', { docId: currentDoc.id }) },
     { k: 'compress', i: 'contract-outline', l: 'Kompres', a: () => go('compress', { docId: currentDoc.id }) },
     { k: 'convert', i: 'swap-horizontal-outline', l: 'Konversi', a: () => go('convert', { docId: currentDoc.id }) },
-    { k: 'annotation', i: 'brush-outline', l: 'Anotasi', a: () => go('annotation', { docId: currentDoc.id }) },
-    { k: 'signature', i: 'create-outline', l: 'Tanda Tangan', a: () => go('signature', { docId: currentDoc.id }) },
-    { k: 'reorder', i: 'reorder-four-outline', l: 'Atur Halaman', a: () => go('reorder', { docId: currentDoc.id }) },
     { k: 'watermark', i: 'water-outline', l: 'Watermark', a: () => go('watermark', { docId: currentDoc.id }) },
     { k: 'share', i: 'share-social-outline', l: 'Bagikan', a: async () => {
       try { if (currentDoc.pdfUri && (await Sharing.isAvailableAsync())) await Sharing.shareAsync(currentDoc.pdfUri); else showToast('Bagikan dokumen'); }
@@ -1309,7 +1302,7 @@ const DetailScreen = ({ colors, go, currentDoc, onToggleFav, onRename, onDelete,
 
   return (
     <View style={{ flex: 1 }}>
-      <Header title={currentDoc.name} subtitle={`${currentDoc.folder} • ${currentDoc.sizeStr} • ${currentDoc.updatedAt}`} onBack={() => go('documents')} colors={colors}
+      <Header title={currentDoc.name} subtitle={`${folderName} • ${currentDoc.sizeStr} • ${currentDoc.pages} hal`} onBack={() => go('documents')} colors={colors}
         right={<IconPill name={currentDoc.favorite ? 'star' : 'star-outline'} colors={colors} active={currentDoc.favorite} onPress={() => onToggleFav(currentDoc.id)} />}
       />
       <View style={{ flexDirection: 'row', paddingHorizontal: 16, marginBottom: 12 }}>
@@ -1324,46 +1317,39 @@ const DetailScreen = ({ colors, go, currentDoc, onToggleFav, onRename, onDelete,
           <>
             {Array.from({ length: currentDoc.pages }).map((_, i) => (
               <View key={i} style={{ flexDirection: 'row', alignItems: 'center', gap: 12, padding: 12, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: 14, marginBottom: 10 }}>
-                <View style={{ width: 54, height: 68, borderRadius: 8, backgroundColor: currentDoc.color + '22', borderWidth: 1, borderColor: currentDoc.color + '55', alignItems: 'center', justifyContent: 'center' }}>
-                  <Text style={{ color: currentDoc.color, fontWeight: '900', fontSize: 12 }}>#{i + 1}</Text>
+                <View style={{ width: 54, height: 68, borderRadius: 8, backgroundColor: currentDoc.color + '22', borderWidth: 1, borderColor: currentDoc.color + '55', alignItems: 'center', justifyContent: 'center', overflow: 'hidden' }}>
+                  {currentDoc.pageImages?.[i] ? (
+                    <Image source={{ uri: currentDoc.pageImages[i] }} style={{ width: '100%', height: '100%' }} />
+                  ) : (
+                    <Text style={{ color: currentDoc.color, fontWeight: '900', fontSize: 12 }}>#{i + 1}</Text>
+                  )}
                 </View>
                 <View style={{ flex: 1 }}>
                   <Text style={{ color: colors.text, fontWeight: '800', fontSize: 13 }}>Halaman {i + 1}</Text>
-                  <Text style={{ color: colors.textMuted, fontSize: 10, marginTop: 2 }}>A4 • Auto-enhanced</Text>
+                  <Text style={{ color: colors.textMuted, fontSize: 10, marginTop: 2 }}>A4 • Scan</Text>
                 </View>
-                <Pressable onPress={() => showToast(`Halaman ${i + 1}`)} style={{ padding: 8 }}><Ionicons name="reorder-four-outline" size={16} color={colors.textMuted} /></Pressable>
-                <Pressable onPress={() => onDeletePage(currentDoc.id, i)} style={{ padding: 8 }}><Ionicons name="trash-outline" size={16} color={colors.rose} /></Pressable>
+                <Pressable onPress={() => onDeletePage(currentDoc.id, i)} style={{ padding: 8 }}>
+                  <Ionicons name="trash-outline" size={16} color={colors.rose} />
+                </Pressable>
               </View>
             ))}
             <Pressable onPress={() => onAddPage(currentDoc.id)} style={{ borderWidth: 1.5, borderColor: colors.borderStrong, borderStyle: 'dashed', borderRadius: 14, paddingVertical: 18, alignItems: 'center', marginTop: 4, flexDirection: 'row', justifyContent: 'center', gap: 8 }}>
               <Ionicons name="add" size={20} color={colors.cyan} />
-              <Text style={{ color: colors.cyan, fontWeight: '800', fontSize: 12 }}>Tambah halaman</Text>
+              <Text style={{ color: colors.cyan, fontWeight: '800', fontSize: 12 }}>Tambah halaman dari scan</Text>
             </Pressable>
-          </>
-        ) : null}
-
-        {tab === 'ocr' ? (
-          <>
-            <View style={{ backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: 14, padding: 16 }}>
-              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 12 }}>
-                <View style={{ backgroundColor: 'rgba(0,242,254,0.12)', paddingHorizontal: 8, paddingVertical: 4, borderRadius: 6, borderWidth: 1, borderColor: 'rgba(0,242,254,0.25)' }}>
-                  <Text style={{ color: colors.cyan, fontWeight: '900', fontSize: 9 }}>OCR</Text>
-                </View>
-                <Text style={{ color: colors.textMuted, fontSize: 10 }}>Akurasi 99.2%</Text>
-              </View>
-              <Text style={{ color: colors.text, fontSize: 12, lineHeight: 20 }}>{currentDoc.ocr || 'Belum ada teks. Jalankan OCR untuk mengekstrak.'}</Text>
-            </View>
-            <View style={{ flexDirection: 'row', gap: 10, marginTop: 10 }}>
-              <Btn label="Copy" icon="copy-outline" variant="soft" colors={colors} onPress={() => showToast('Teks disalin')} style={{ flex: 1 }} />
-              <Btn label="Bagikan" icon="share-outline" variant="soft" colors={colors} onPress={() => showToast('Bagikan teks')} style={{ flex: 1 }} />
-            </View>
           </>
         ) : null}
 
         {tab === 'info' ? (
           <View style={{ backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: 14, overflow: 'hidden' }}>
-            {[['Nama', currentDoc.name], ['Folder', currentDoc.folder], ['Halaman', `${currentDoc.pages}`], ['Ukuran', currentDoc.sizeStr], ['Terakhir diubah', currentDoc.updatedAt], ['Watermark', 'Tidak aktif'], ['Tanda tangan', 'Belum ada'], ['Status OCR', '✓ Terindeks AI']].map(([label, value], i) => (
-              <View key={label} style={{ flexDirection: 'row', paddingHorizontal: 14, paddingVertical: 12, borderBottomWidth: i === 7 ? 0 : 1, borderBottomColor: colors.divider }}>
+            {[
+              ['Nama', currentDoc.name],
+              ['Folder', folderName],
+              ['Halaman', `${currentDoc.pages}`],
+              ['Ukuran', currentDoc.sizeStr],
+              ['Dibuat', currentDoc.updatedAt],
+            ].map(([label, value], i, arr) => (
+              <View key={label} style={{ flexDirection: 'row', paddingHorizontal: 14, paddingVertical: 12, borderBottomWidth: i === arr.length - 1 ? 0 : 1, borderBottomColor: colors.divider }}>
                 <Text style={{ color: colors.textMuted, fontSize: 12, width: 120 }}>{label}</Text>
                 <Text style={{ color: colors.text, fontSize: 12, fontWeight: '700', flex: 1 }}>{value}</Text>
               </View>
@@ -1408,177 +1394,9 @@ const DetailScreen = ({ colors, go, currentDoc, onToggleFav, onRename, onDelete,
 };
 
 /* ============================================================
-   SCREEN: OCR
-   ============================================================ */
-const OCRScreen = ({ colors, go, currentDoc, showToast }) => {
-  const [scanning, setScanning] = useState(true);
-  const [progress, setProgress] = useState(0);
-
-  useEffect(() => {
-    const iv = setInterval(() => {
-      setProgress((p) => {
-        if (p >= 100) { clearInterval(iv); setScanning(false); return 100; }
-        return p + 10;
-      });
-    }, 120);
-    return () => clearInterval(iv);
-  }, []);
-
-  return (
-    <View style={{ flex: 1 }}>
-      <Header title="OCR Teks" subtitle={currentDoc?.name || '—'} onBack={() => go('detail', { docId: currentDoc?.id })} colors={colors}
-        right={<IconPill name="copy-outline" colors={colors} onPress={() => showToast('Teks disalin')} />}
-      />
-      <ScrollView contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 120 }}>
-        {scanning ? (
-          <View style={{ backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: 14, padding: 30, alignItems: 'center' }}>
-            <ActivityIndicator color={colors.cyan} size="large" />
-            <Text style={{ color: colors.text, fontSize: 14, fontWeight: '700', marginTop: 14 }}>Mengekstrak teks…</Text>
-            <Text style={{ color: colors.textMuted, fontSize: 11, marginTop: 4 }}>{progress}% — AI Neural Vision</Text>
-            <View style={{ width: '100%', height: 6, backgroundColor: colors.surfaceSoft, borderRadius: 3, marginTop: 14, overflow: 'hidden' }}>
-              <View style={{ width: `${progress}%`, height: '100%', backgroundColor: colors.cyan, borderRadius: 3 }} />
-            </View>
-          </View>
-        ) : (
-          <>
-            <View style={{ backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: 14, padding: 16 }}>
-              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 12 }}>
-                <View style={{ backgroundColor: 'rgba(0,242,254,0.12)', paddingHorizontal: 8, paddingVertical: 4, borderRadius: 6, borderWidth: 1, borderColor: 'rgba(0,242,254,0.25)' }}>
-                  <Text style={{ color: colors.cyan, fontWeight: '900', fontSize: 9 }}>OCR RESULT</Text>
-                </View>
-                <Text style={{ color: colors.textMuted, fontSize: 10 }}>99.2% akurasi</Text>
-              </View>
-              <Text selectable style={{ color: colors.text, fontSize: 13, lineHeight: 22 }}>{currentDoc?.ocr || 'Tidak ada teks terdeteksi.'}</Text>
-            </View>
-            <View style={{ flexDirection: 'row', gap: 10, marginTop: 12 }}>
-              <Btn label="Copy" icon="copy-outline" variant="soft" colors={colors} onPress={() => showToast('Teks disalin')} style={{ flex: 1 }} />
-              <Btn label="Bagikan" icon="share-outline" variant="soft" colors={colors} onPress={() => showToast('Bagikan teks')} style={{ flex: 1 }} />
-            </View>
-          </>
-        )}
-      </ScrollView>
-    </View>
-  );
-};
-
-/* ============================================================
-   SCREEN: ANNOTATION
-   ============================================================ */
-const AnnotationScreen = ({ colors, go, currentDoc, showToast }) => {
-  const [tool, setTool] = useState('text');
-  const [color, setColor] = useState(colors.cyan);
-  const [texts, setTexts] = useState([]);
-  const [textInput, setTextInput] = useState('');
-
-  const addText = () => {
-    if (!textInput.trim()) return;
-    setTexts((t) => [...t, { id: uid('anno'), value: textInput, x: 30 + t.length * 12, y: 60 + t.length * 30, color }]);
-    setTextInput('');
-    showToast('Anotasi ditambahkan');
-  };
-
-  const tools = [
-    { k: 'text', icon: 'text-outline', l: 'Teks' },
-    { k: 'pen', icon: 'brush-outline', l: 'Pena' },
-    { k: 'highlight', icon: 'color-fill-outline', l: 'Highlight' },
-    { k: 'shape', icon: 'square-outline', l: 'Bentuk' },
-  ];
-
-  return (
-    <View style={{ flex: 1, backgroundColor: '#000' }}>
-      <StatusBar style="light" />
-      <View style={{ paddingHorizontal: 16, paddingTop: 8, paddingBottom: 10, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
-        <Pressable onPress={() => go('detail', { docId: currentDoc?.id })} style={circleBtnStyle}><Ionicons name="close" size={18} color="#fff" /></Pressable>
-        <Text style={{ color: '#fff', fontWeight: '800', fontSize: 15 }}>Anotasi</Text>
-        <Pressable onPress={() => { showToast('Anotasi disimpan'); go('detail', { docId: currentDoc?.id }); }} style={{ paddingHorizontal: 16, paddingVertical: 10, borderRadius: 12, backgroundColor: '#fff' }}>
-          <Text style={{ color: '#000', fontWeight: '800', fontSize: 13 }}>Simpan</Text>
-        </Pressable>
-      </View>
-
-      <View style={{ flex: 1, padding: 16 }}>
-        <View style={{ flex: 1, backgroundColor: '#F8F8F6', borderRadius: 12, padding: 18, position: 'relative', overflow: 'hidden' }}>
-          <View style={{ height: 12, width: '60%', backgroundColor: '#C9CCD2', borderRadius: 3 }} />
-          <View style={{ height: 8, width: '92%', backgroundColor: '#DFE2E7', borderRadius: 3, marginTop: 12 }} />
-          <View style={{ height: 8, width: '80%', backgroundColor: '#DFE2E7', borderRadius: 3, marginTop: 6 }} />
-          <View style={{ height: 8, width: '88%', backgroundColor: '#DFE2E7', borderRadius: 3, marginTop: 6 }} />
-          {texts.map((t) => (
-            <View key={t.id} style={{ position: 'absolute', top: t.y, left: t.x, backgroundColor: t.color + '22', paddingHorizontal: 8, paddingVertical: 4, borderRadius: 6 }}>
-              <Text style={{ color: t.color, fontWeight: '800', fontSize: 13 }}>{t.value}</Text>
-            </View>
-          ))}
-        </View>
-      </View>
-
-      {tool === 'text' ? (
-        <View style={{ flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16, marginBottom: 12 }}>
-          <TextInput value={textInput} onChangeText={setTextInput} placeholder="Ketik anotasi…" placeholderTextColor="rgba(255,255,255,0.4)" style={{ flex: 1, backgroundColor: 'rgba(255,255,255,0.1)', borderRadius: 12, paddingHorizontal: 12, paddingVertical: 10, color: '#fff' }} />
-          <Pressable onPress={addText} style={{ marginLeft: 8, paddingHorizontal: 16, paddingVertical: 12, borderRadius: 12, backgroundColor: '#fff' }}>
-            <Text style={{ color: '#000', fontWeight: '800', fontSize: 13 }}>Tambah</Text>
-          </Pressable>
-        </View>
-      ) : null}
-
-      <View style={{ flexDirection: 'row', justifyContent: 'space-around', marginBottom: 12 }}>
-        {tools.map((t) => (
-          <Pressable key={t.k} onPress={() => setTool(t.k)} style={{ alignItems: 'center', padding: 6 }}>
-            <View style={{ width: 46, height: 46, borderRadius: 12, backgroundColor: tool === t.k ? '#fff' : 'rgba(255,255,255,0.12)', alignItems: 'center', justifyContent: 'center' }}>
-              <Ionicons name={t.icon} size={18} color={tool === t.k ? '#000' : '#fff'} />
-            </View>
-            <Text style={{ color: '#fff', fontSize: 10, marginTop: 4, fontWeight: '700' }}>{t.l}</Text>
-          </Pressable>
-        ))}
-      </View>
-
-      <View style={{ flexDirection: 'row', justifyContent: 'center', paddingBottom: 24 }}>
-        {ANNO_COLORS.map((c) => (
-          <Pressable key={c} onPress={() => setColor(c)} style={{ width: 28, height: 28, borderRadius: 14, backgroundColor: c, marginHorizontal: 5, borderWidth: 2, borderColor: color === c ? '#fff' : 'transparent' }} />
-        ))}
-      </View>
-    </View>
-  );
-};
-
-/* ============================================================
-   SCREEN: SIGNATURE
-   ============================================================ */
-const SignatureScreen = ({ colors, go, currentDoc, showToast }) => {
-  const [mode, setMode] = useState('draw');
-  const [name, setName] = useState('Ahmad Rizky');
-
-  return (
-    <View style={{ flex: 1 }}>
-      <Header title="Tanda Tangan" subtitle={currentDoc?.name || '—'} onBack={() => go('detail', { docId: currentDoc?.id })} colors={colors}
-        right={<Btn label="Simpan" colors={colors} onPress={() => { showToast('Tanda tangan disimpan'); go('detail', { docId: currentDoc?.id }); }} style={{ paddingVertical: 10, paddingHorizontal: 14 }} />}
-      />
-      <View style={{ flexDirection: 'row', paddingHorizontal: 16, marginBottom: 10 }}>
-        <Chip label="Gambar" active={mode === 'draw'} colors={colors} onPress={() => setMode('draw')} />
-        <Chip label="Ketik" active={mode === 'type'} colors={colors} onPress={() => setMode('type')} />
-      </View>
-      <View style={{ flex: 1, padding: 16 }}>
-        <View style={{ flex: 1, backgroundColor: '#fff', borderRadius: 16, borderWidth: 1, borderColor: colors.border, alignItems: 'center', justifyContent: 'center', padding: 20 }}>
-          {mode === 'draw' ? (
-            <View style={{ flex: 1, width: '100%', justifyContent: 'center', alignItems: 'center' }}>
-              <Text style={{ fontSize: 42, color: '#111', fontStyle: 'italic', fontFamily: Platform.OS === 'ios' ? 'Snell Roundhand' : 'cursive', textAlign: 'center' }}>{name}</Text>
-              <View style={{ height: 1, backgroundColor: '#CBD5E1', width: '70%', marginTop: 12 }} />
-              <Text style={{ color: '#94A3B8', fontSize: 11, marginTop: 6 }}>Area tanda tangan</Text>
-            </View>
-          ) : (
-            <TextInput value={name} onChangeText={setName} placeholder="Ketik nama…" placeholderTextColor="#94A3B8" style={{ fontSize: 28, color: '#111', textAlign: 'center', paddingVertical: 12, width: '100%' }} />
-          )}
-        </View>
-      </View>
-      <View style={{ flexDirection: 'row', gap: 10, paddingHorizontal: 16, paddingBottom: 20 }}>
-        <Btn label="Bersihkan" icon="refresh-outline" variant="soft" colors={colors} onPress={() => showToast('Area dibersihkan')} style={{ flex: 1 }} />
-        <Btn label="Warna" icon="color-palette-outline" variant="soft" colors={colors} onPress={() => showToast('Pilih warna')} style={{ flex: 1 }} />
-      </View>
-    </View>
-  );
-};
-
-/* ============================================================
    SCREEN: MERGE
    ============================================================ */
-const MergeScreen = ({ colors, go, documents, showToast, params, onComplete }) => {
+const MergeScreen = ({ colors, go, documents, folders, showToast, params, onComplete }) => {
   const [selected, setSelected] = useState(params?.selectedId ? [params.selectedId] : []);
   const toggle = (id) => setSelected((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
   const totalPages = selected.reduce((s, id) => { const d = documents.find((x) => x.id === id); return s + (d?.pages || 0); }, 0);
@@ -1586,21 +1404,38 @@ const MergeScreen = ({ colors, go, documents, showToast, params, onComplete }) =
   const executeMerge = async () => {
     if (selected.length < 2) return;
     try {
-      const pdfFiles = selected.map((id) => documents.find((x) => x.id === id)).filter((d) => d && d.pdfUri).map((d) => ({ uri: d.pdfUri, name: d.name }));
+      const pdfFiles = selected
+        .map((id) => documents.find((x) => x.id === id))
+        .filter((d) => d && d.pdfUri)
+        .map((d) => ({ uri: d.pdfUri, name: d.name }));
       if (pdfFiles.length < 2) { showToast('Beberapa dokumen belum punya PDF'); return; }
       onComplete('start', { total: pdfFiles.length });
       const result = await mergePdfs(pdfFiles, 'gandes_merged');
+
+      const firstDoc = documents.find((d) => d.id === selected[0]);
       const newDoc = {
         id: uid('doc'),
         name: `Gabungan ${new Date().toLocaleDateString('id-ID')}`,
-        folder: documents.find((d) => d.id === selected[0])?.folder || 'Catatan',
-        pages: result.pages, size: result.size, sizeStr: result.sizeStr,
-        updatedAt: 'Baru saja', favorite: false, color: '#00f2fe', ocr: '', pdfUri: result.uri,
+        folderId: firstDoc?.folderId || folders[2]?.id || 'f3',
+        pages: result.pages,
+        size: result.size,
+        sizeStr: result.sizeStr,
+        updatedAt: 'Baru saja',
+        createdAt: Date.now(),
+        favorite: false,
+        color: '#00f2fe',
+        ocr: '',
+        pdfUri: result.uri,
+        pageImages: [],
       };
       onComplete('done', newDoc);
       showToast(`✓ ${result.pages} halaman digabung`);
       go('documents');
-    } catch (e) { onComplete('error'); showToast('Gagal merge'); }
+    } catch (e) {
+      console.error(e);
+      onComplete('error');
+      showToast('Gagal merge');
+    }
   };
 
   const ordered = selected.map((id) => documents.find((d) => d.id === id)).filter(Boolean);
@@ -1648,9 +1483,9 @@ const MergeScreen = ({ colors, go, documents, showToast, params, onComplete }) =
 };
 
 /* ============================================================
-   SCREEN: SPLIT
+   SCREEN: SPLIT (Fix A10/A11: files masuk ke documents)
    ============================================================ */
-const SplitScreen = ({ colors, go, documents, currentDoc, showToast, params, onComplete }) => {
+const SplitScreen = ({ colors, go, documents, currentDoc, folders, showToast, params, onComplete }) => {
   const doc = currentDoc || documents.find((d) => d.id === params?.docId) || documents[0];
   const [mode, setMode] = useState('range');
   const [ranges, setRanges] = useState([{ from: 1, to: 1 }]);
@@ -1663,21 +1498,73 @@ const SplitScreen = ({ colors, go, documents, currentDoc, showToast, params, onC
     try {
       onComplete('start', { total: 1 });
       if (mode === 'range') {
-        const result = await splitPdfByRanges(doc.pdfUri, ranges);
-        showToast(`✓ Split jadi ${result.length} file`);
+        const results = await splitPdfByRanges(doc.pdfUri, ranges);
+        // Fix A11: masukkan ke documents
+        const newDocs = results.map((r, i) => ({
+          id: uid('doc'),
+          name: `${doc.name} - Bagian ${i + 1}`,
+          folderId: doc.folderId,
+          pages: r.pages,
+          size: r.size,
+          sizeStr: fmtSize(r.size),
+          updatedAt: 'Baru saja',
+          createdAt: Date.now() + i,
+          favorite: false,
+          color: doc.color,
+          ocr: '',
+          pdfUri: r.uri,
+          pageImages: [],
+        }));
+        for (const nd of newDocs) onComplete('done', nd);
+        showToast(`✓ Split jadi ${results.length} file`);
       } else if (mode === 'extract') {
         const res = await extractPdfPages(doc.pdfUri, selectedPages);
-        const newDoc = { id: uid('doc'), name: `${doc.name} (extract)`, folder: doc.folder, pages: res.pages, size: res.size, sizeStr: fmtSize(res.size), updatedAt: 'Baru saja', favorite: false, color: doc.color, ocr: doc.ocr, pdfUri: res.uri };
+        const newDoc = {
+          id: uid('doc'),
+          name: `${doc.name} (extract)`,
+          folderId: doc.folderId,
+          pages: res.pages,
+          size: res.size,
+          sizeStr: fmtSize(res.size),
+          updatedAt: 'Baru saja',
+          createdAt: Date.now(),
+          favorite: false,
+          color: doc.color,
+          ocr: '',
+          pdfUri: res.uri,
+          pageImages: selectedPages.map((n) => doc.pageImages?.[n - 1]).filter(Boolean),
+        };
         onComplete('done', newDoc);
         showToast(`✓ ${res.pages} halaman diambil`);
       } else {
         const allRanges = Array.from({ length: doc.pages }).map((_, i) => ({ from: i + 1, to: i + 1 }));
-        const result = await splitPdfByRanges(doc.pdfUri, allRanges);
-        showToast(`✓ ${result.length} file dibuat`);
+        const results = await splitPdfByRanges(doc.pdfUri, allRanges);
+        // Fix A10: masukkan ke documents
+        const newDocs = results.map((r, i) => ({
+          id: uid('doc'),
+          name: `${doc.name} - Hal ${i + 1}`,
+          folderId: doc.folderId,
+          pages: r.pages,
+          size: r.size,
+          sizeStr: fmtSize(r.size),
+          updatedAt: 'Baru saja',
+          createdAt: Date.now() + i,
+          favorite: false,
+          color: doc.color,
+          ocr: '',
+          pdfUri: r.uri,
+          pageImages: doc.pageImages?.[i] ? [doc.pageImages[i]] : [],
+        }));
+        for (const nd of newDocs) onComplete('done', nd);
+        showToast(`✓ ${results.length} file dibuat`);
       }
       onComplete('done');
       go('documents');
-    } catch (e) { onComplete('error'); showToast('Gagal split'); }
+    } catch (e) {
+      console.error(e);
+      onComplete('error');
+      showToast('Gagal split');
+    }
   };
 
   return (
@@ -1713,15 +1600,12 @@ const SplitScreen = ({ colors, go, documents, currentDoc, showToast, params, onC
           </>
         ) : mode === 'each' ? (
           <>
-            {Array.from({ length: doc.pages }).map((_, i) => (
-              <View key={i} style={{ flexDirection: 'row', alignItems: 'center', gap: 12, padding: 12, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: 14, marginBottom: 8 }}>
-                <View style={{ width: 44, height: 56, borderRadius: 8, backgroundColor: doc.color + '22', borderWidth: 1, borderColor: doc.color + '55', alignItems: 'center', justifyContent: 'center' }}>
-                  <Text style={{ color: doc.color, fontWeight: '900', fontSize: 12 }}>#{i + 1}</Text>
-                </View>
-                <Text style={{ color: colors.text, fontWeight: '700', fontSize: 12.5, flex: 1 }}>Halaman {i + 1}</Text>
-              </View>
-            ))}
-            <Btn label={`Pisah Semua (${doc.pages} file)`} colors={colors} onPress={executeSplit} style={{ marginTop: 8 }} />
+            <View style={{ padding: 14, backgroundColor: colors.surfaceSoft, borderWidth: 1, borderColor: colors.border, borderRadius: 14, marginBottom: 16 }}>
+              <Text style={{ color: colors.textMuted, fontSize: 11, lineHeight: 17 }}>
+                ⚠️ Ini akan membuat {doc.pages} file PDF (1 per halaman) dan menambahkannya ke daftar dokumen.
+              </Text>
+            </View>
+            <Btn label={`Pisah Semua (${doc.pages} file)`} colors={colors} onPress={executeSplit} />
           </>
         ) : (
           <>
@@ -1749,27 +1633,22 @@ const SplitScreen = ({ colors, go, documents, currentDoc, showToast, params, onC
 };
 
 /* ============================================================
-   SCREEN: COMPRESS
+   SCREEN: COMPRESS (Fix A6: honest about what it does)
    ============================================================ */
 const CompressScreen = ({ colors, go, documents, currentDoc, showToast, params, onComplete }) => {
   const doc = currentDoc || documents.find((d) => d.id === params?.docId) || documents[0];
   const [level, setLevel] = useState('balanced');
-  const [custom, setCustom] = useState(70);
 
   if (!doc) return <View style={{ flex: 1 }}><Header title="Kompres PDF" onBack={() => go('pdf-tools')} colors={colors} /><EmptyState icon="contract-outline" title="Pilih dokumen" colors={colors} /></View>;
-
-  const lvl = COMPRESS_LEVELS.find((l) => l.key === level) || COMPRESS_LEVELS[1];
-  const ratio = level === 'custom' ? 100 - custom : lvl.ratio;
-  const newSize = doc.size * (1 - ratio / 100);
 
   const executeCompress = async () => {
     if (!doc.pdfUri) { showToast('Dokumen belum punya PDF'); return; }
     try {
       onComplete('start', { total: 1 });
-      const result = await compressPdf(doc.pdfUri, ratio);
+      const result = await compressPdf(doc.pdfUri, level);
       const updatedDoc = { ...doc, size: result.size, sizeStr: result.sizeStr, updatedAt: 'Baru saja (compressed)', pdfUri: result.uri };
       onComplete('done', updatedDoc);
-      showToast(`✓ Kompres selesai — hemat ${ratio}%`);
+      showToast('✓ Kompres selesai');
       go('detail', { docId: doc.id });
     } catch (e) { onComplete('error'); showToast('Gagal kompres'); }
   };
@@ -1785,46 +1664,30 @@ const CompressScreen = ({ colors, go, documents, currentDoc, showToast, params, 
             <Text style={{ color: colors.textMuted, fontSize: 10, marginTop: 3 }}>{doc.pages} halaman • {doc.sizeStr}</Text>
           </View>
         </View>
-        <Text style={{ color: colors.textMuted, fontSize: 10, fontWeight: '800', letterSpacing: 1, marginBottom: 10 }}>LEVEL KOMPRESI</Text>
-        <View style={{ flexDirection: 'row', flexWrap: 'wrap', marginHorizontal: -4 }}>
-          {[...COMPRESS_LEVELS, { key: 'custom', label: 'Custom', ratio: 0, desc: 'Manual' }].map((l) => (
-            <View key={l.key} style={{ width: '50%', padding: 4 }}>
-              <Pressable onPress={() => setLevel(l.key)} style={{ padding: 12, borderRadius: 14, backgroundColor: level === l.key ? 'rgba(0,242,254,0.08)' : colors.surface, borderWidth: 1, borderColor: level === l.key ? colors.cyan : colors.border }}>
-                <Text style={{ color: level === l.key ? colors.cyan : colors.text, fontSize: 13, fontWeight: '800' }}>{l.label}</Text>
-                {l.ratio ? <Text style={{ color: colors.textMuted, fontSize: 10, marginTop: 3 }}>-{l.ratio}%</Text> : <Text style={{ color: colors.textMuted, fontSize: 10, marginTop: 3 }}>Manual</Text>}
-              </Pressable>
+
+        <View style={{ padding: 14, backgroundColor: 'rgba(245,158,11,0.08)', borderWidth: 1, borderColor: 'rgba(245,158,11,0.3)', borderRadius: 14, marginBottom: 16 }}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+            <Ionicons name="information-circle-outline" size={16} color={colors.amber} />
+            <Text style={{ color: colors.amber, fontWeight: '800', fontSize: 11 }}>YANG DIKOMPRES</Text>
+          </View>
+          <Text style={{ color: colors.textMuted, fontSize: 11, lineHeight: 17 }}>
+            Kompres ini membersihkan metadata (title, author, subject, producer) dan mengoptimasi struktur objek PDF. Untuk hasil signifikan pada PDF hasil scan, sebaiknya re-scan dengan preset kualitas lebih rendah (Compact).
+          </Text>
+        </View>
+
+        <Text style={{ color: colors.textMuted, fontSize: 10, fontWeight: '800', letterSpacing: 1, marginBottom: 10 }}>LEVEL</Text>
+        {COMPRESS_LEVELS.map((l) => (
+          <Pressable key={l.key} onPress={() => setLevel(l.key)} style={{ padding: 14, borderRadius: 14, backgroundColor: level === l.key ? 'rgba(0,242,254,0.08)' : colors.surface, borderWidth: 1, borderColor: level === l.key ? colors.cyan : colors.border, marginBottom: 10, flexDirection: 'row', alignItems: 'center', gap: 12 }}>
+            <View style={{ width: 22, height: 22, borderRadius: 11, borderWidth: 2, borderColor: level === l.key ? colors.cyan : colors.border, backgroundColor: level === l.key ? colors.cyan : 'transparent', alignItems: 'center', justifyContent: 'center' }}>
+              {level === l.key ? <Ionicons name="checkmark" size={12} color="#050811" /> : null}
             </View>
-          ))}
-        </View>
-        {level === 'custom' ? (
-          <View style={{ marginTop: 16 }}>
-            <Text style={{ color: colors.textMuted, fontSize: 10, fontWeight: '800', letterSpacing: 1, marginBottom: 10 }}>KUALITAS: <Text style={{ color: colors.cyan }}>{custom}%</Text></Text>
-            <View style={{ flexDirection: 'row', gap: 8, alignItems: 'center' }}>
-              <Pressable onPress={() => setCustom(Math.max(10, custom - 10))} style={{ width: 40, height: 40, borderRadius: 12, backgroundColor: colors.surfaceSoft, borderWidth: 1, borderColor: colors.border, alignItems: 'center', justifyContent: 'center' }}><Ionicons name="remove" size={18} color={colors.text} /></Pressable>
-              <View style={{ flex: 1, height: 8, backgroundColor: colors.surfaceSoft, borderRadius: 4, overflow: 'hidden', borderWidth: 1, borderColor: colors.border }}>
-                <View style={{ width: `${custom}%`, height: '100%', backgroundColor: colors.cyan }} />
-              </View>
-              <Pressable onPress={() => setCustom(Math.min(100, custom + 10))} style={{ width: 40, height: 40, borderRadius: 12, backgroundColor: colors.surfaceSoft, borderWidth: 1, borderColor: colors.border, alignItems: 'center', justifyContent: 'center' }}><Ionicons name="add" size={18} color={colors.text} /></Pressable>
+            <View style={{ flex: 1 }}>
+              <Text style={{ color: level === l.key ? colors.cyan : colors.text, fontSize: 13, fontWeight: '800' }}>{l.label}</Text>
+              <Text style={{ color: colors.textMuted, fontSize: 10, marginTop: 2 }}>{l.desc}</Text>
             </View>
-          </View>
-        ) : null}
-        <Text style={{ color: colors.textMuted, fontSize: 10, fontWeight: '800', letterSpacing: 1, marginTop: 22, marginBottom: 10 }}>HASIL</Text>
-        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 14, padding: 16, backgroundColor: colors.surfaceSoft, borderWidth: 1, borderColor: colors.border, borderRadius: 16 }}>
-          <View style={{ flex: 1, alignItems: 'center' }}>
-            <Text style={{ color: colors.text, fontSize: 18, fontWeight: '900' }}>{doc.sizeStr}</Text>
-            <Text style={{ color: colors.textMuted, fontSize: 9, fontWeight: '700', marginTop: 3 }}>SEBELUM</Text>
-          </View>
-          <Ionicons name="arrow-forward" size={20} color={colors.cyan} />
-          <View style={{ flex: 1, alignItems: 'center' }}>
-            <Text style={{ color: colors.cyan, fontSize: 18, fontWeight: '900' }}>{fmtSize(newSize)}</Text>
-            <Text style={{ color: colors.cyan, fontSize: 9, fontWeight: '700', marginTop: 3 }}>SESUDAH</Text>
-          </View>
-        </View>
-        <View style={{ alignItems: 'center', marginTop: 12 }}>
-          <View style={{ paddingHorizontal: 12, paddingVertical: 5, borderRadius: 20, backgroundColor: 'rgba(16,185,129,0.15)', borderWidth: 1, borderColor: 'rgba(16,185,129,0.4)' }}>
-            <Text style={{ color: colors.emerald, fontSize: 10, fontWeight: '800' }}>↓ HEMAT {ratio}%</Text>
-          </View>
-        </View>
+          </Pressable>
+        ))}
+
         <Btn label="Kompres Sekarang" icon="contract-outline" colors={colors} onPress={executeCompress} style={{ marginTop: 20 }} />
       </ScrollView>
     </View>
@@ -1832,43 +1695,76 @@ const CompressScreen = ({ colors, go, documents, currentDoc, showToast, params, 
 };
 
 /* ============================================================
-   SCREEN: CONVERT
+   SCREEN: CONVERT (Fix A5: real PDF → JPG from pageImages)
    ============================================================ */
 const ConvertScreen = ({ colors, go, documents, currentDoc, showToast, params, onComplete }) => {
   const doc = currentDoc || documents.find((d) => d.id === params?.docId) || documents[0];
   const [format, setFormat] = useState('jpg');
-  const [mode, setMode] = useState('pdf2img');
+  const [processing, setProcessing] = useState(false);
 
   if (!doc) return <View style={{ flex: 1 }}><Header title="Konversi" onBack={() => go('pdf-tools')} colors={colors} /><EmptyState icon="swap-horizontal-outline" title="Pilih dokumen" colors={colors} /></View>;
 
+  const pageImages = doc.pageImages || [];
+
   const executeConvert = async () => {
+    if (processing) return;
+    if (pageImages.length === 0) {
+      showToast('Dokumen ini tidak punya page image (hasil merge/split)');
+      return;
+    }
     try {
-      onComplete('start', { total: doc.pages });
-      await new Promise((r) => setTimeout(r, 1500));
-      if (mode === 'pdf2img') showToast(`✓ Konversi ke ${format.toUpperCase()} selesai`);
-      else showToast('Gunakan Impor Galeri di Scanner');
+      setProcessing(true);
+      onComplete('start', { total: pageImages.length });
+      const outputs = [];
+      for (let i = 0; i < pageImages.length; i++) {
+        const src = pageImages[i];
+        const targetFormat = format === 'png' ? ImageManipulator.SaveFormat.PNG : ImageManipulator.SaveFormat.JPEG;
+        const result = await ImageManipulator.manipulateAsync(src, [], { compress: 0.92, format: targetFormat });
+        const ext = format === 'png' ? 'png' : 'jpg';
+        const filename = `${doc.name.replace(/[^a-z0-9]/gi, '_')}_hal${i + 1}.${ext}`;
+        const dest = `${FileSystem.documentDirectory}${filename}`;
+        await FileSystem.copyAsync({ from: result.uri, to: dest });
+        outputs.push(dest);
+      }
       onComplete('done');
-    } catch (e) { onComplete('error'); showToast('Gagal konversi'); }
+      showToast(`✓ ${outputs.length} file ${format.toUpperCase()} diekspor`);
+      // Tawarkan share
+      if (outputs.length === 1 && (await Sharing.isAvailableAsync())) {
+        await Sharing.shareAsync(outputs[0]);
+      } else {
+        showToast(`File tersimpan di folder aplikasi (${outputs.length} file)`);
+      }
+    } catch (e) {
+      console.error(e);
+      onComplete('error');
+      showToast('Gagal konversi');
+    } finally {
+      setProcessing(false);
+    }
   };
 
   return (
     <View style={{ flex: 1 }}>
       <Header title="Konversi" subtitle={doc.name} onBack={() => go('pdf-tools')} colors={colors} />
       <ScrollView contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 120 }}>
-        <View style={{ flexDirection: 'row', gap: 8, marginBottom: 16 }}>
-          <Chip label="PDF → Gambar" active={mode === 'pdf2img'} colors={colors} onPress={() => setMode('pdf2img')} />
-          <Chip label="Gambar → PDF" active={mode === 'img2pdf'} colors={colors} onPress={() => setMode('img2pdf')} />
-        </View>
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12, padding: 14, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: 14, marginBottom: 16 }}>
           <DocThumb doc={doc} colors={colors} size={46} />
           <View style={{ flex: 1 }}>
             <Text style={{ color: colors.text, fontWeight: '800', fontSize: 13 }} numberOfLines={1}>{doc.name}</Text>
-            <Text style={{ color: colors.textMuted, fontSize: 10, marginTop: 3 }}>{doc.pages} halaman • {doc.sizeStr}</Text>
+            <Text style={{ color: colors.textMuted, fontSize: 10, marginTop: 3 }}>{doc.pages} halaman • {pageImages.length} page image tersedia</Text>
           </View>
         </View>
-        {mode === 'pdf2img' ? (
+
+        {pageImages.length === 0 ? (
+          <View style={{ padding: 16, backgroundColor: 'rgba(245,158,11,0.08)', borderWidth: 1, borderColor: 'rgba(245,158,11,0.3)', borderRadius: 14 }}>
+            <Text style={{ color: colors.amber, fontWeight: '800', fontSize: 12, marginBottom: 6 }}>⚠️ Tidak Bisa Konversi</Text>
+            <Text style={{ color: colors.textMuted, fontSize: 11, lineHeight: 17 }}>
+              Dokumen ini tidak memiliki page image (mungkin dari merge/split). Hanya dokumen hasil scan langsung yang bisa dikonversi.
+            </Text>
+          </View>
+        ) : (
           <>
-            <Text style={{ color: colors.textMuted, fontSize: 10, fontWeight: '800', letterSpacing: 1, marginBottom: 10 }}>KONVERSI KE FORMAT</Text>
+            <Text style={{ color: colors.textMuted, fontSize: 10, fontWeight: '800', letterSpacing: 1, marginBottom: 10 }}>FORMAT</Text>
             <View style={{ flexDirection: 'row', flexWrap: 'wrap', marginHorizontal: -5 }}>
               {CONVERT_FORMATS.map((f) => (
                 <View key={f.key} style={{ width: '50%', padding: 5 }}>
@@ -1878,51 +1774,22 @@ const ConvertScreen = ({ colors, go, documents, currentDoc, showToast, params, o
                     </View>
                     <View style={{ flex: 1 }}>
                       <Text style={{ color: colors.text, fontWeight: '800', fontSize: 12 }}>{f.label}</Text>
-                      <Text style={{ color: colors.textMuted, fontSize: 9, marginTop: 2 }}>{f.size}</Text>
+                      <Text style={{ color: colors.textMuted, fontSize: 9, marginTop: 2 }}>{f.desc}</Text>
                     </View>
                   </Pressable>
                 </View>
               ))}
             </View>
-            <Btn label={`Konversi ke ${format.toUpperCase()}`} icon="swap-horizontal-outline" colors={colors} onPress={executeConvert} style={{ marginTop: 20 }} />
+
+            <View style={{ marginTop: 16, padding: 14, backgroundColor: colors.surfaceSoft, borderWidth: 1, borderColor: colors.border, borderRadius: 14 }}>
+              <Text style={{ color: colors.textMuted, fontSize: 11, lineHeight: 17 }}>
+                Akan mengekspor {pageImages.length} file {format.toUpperCase()} ke folder aplikasi.
+              </Text>
+            </View>
+
+            <Btn label={`Konversi ke ${format.toUpperCase()}`} icon="swap-horizontal-outline" colors={colors} onPress={executeConvert} disabled={processing} style={{ marginTop: 20 }} />
           </>
-        ) : (
-          <View style={{ padding: 16, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: 14 }}>
-            <Text style={{ color: colors.text, fontWeight: '800', fontSize: 13, marginBottom: 8 }}>Gambar → PDF</Text>
-            <Text style={{ color: colors.textMuted, fontSize: 11, lineHeight: 18 }}>Buka Scanner → tap Impor Galeri → pilih gambar → PDF otomatis dibuat.</Text>
-            <Btn label="Buka Scanner" icon="scan" colors={colors} onPress={() => go('scanner', { openGallery: true })} style={{ marginTop: 14 }} />
-          </View>
         )}
-      </ScrollView>
-    </View>
-  );
-};
-
-/* ============================================================
-   SCREEN: REORDER
-   ============================================================ */
-const ReorderScreen = ({ colors, go, documents, currentDoc, showToast, params }) => {
-  const doc = currentDoc || documents.find((d) => d.id === params?.docId) || documents[0];
-  if (!doc) return <View style={{ flex: 1 }}><Header title="Atur Halaman" onBack={() => go('pdf-tools')} colors={colors} /><EmptyState icon="reorder-four-outline" title="Pilih dokumen" colors={colors} /></View>;
-
-  return (
-    <View style={{ flex: 1 }}>
-      <Header title="Atur Halaman" subtitle={`${doc.name} • ${doc.pages} halaman`} onBack={() => go('pdf-tools')} colors={colors}
-        right={<Btn label="Simpan" colors={colors} onPress={() => { showToast('Urutan disimpan'); go('detail', { docId: doc.id }); }} style={{ paddingVertical: 10, paddingHorizontal: 14 }} />}
-      />
-      <ScrollView contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 120 }}>
-        {Array.from({ length: doc.pages }).map((_, i) => (
-          <View key={i} style={{ flexDirection: 'row', alignItems: 'center', gap: 12, padding: 12, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: 14, marginBottom: 8 }}>
-            <Ionicons name="reorder-two-outline" size={20} color={colors.textMuted} />
-            <View style={{ width: 44, height: 56, borderRadius: 8, backgroundColor: doc.color + '22', borderWidth: 1, borderColor: doc.color + '55', alignItems: 'center', justifyContent: 'center' }}>
-              <Text style={{ color: doc.color, fontWeight: '900', fontSize: 12 }}>#{i + 1}</Text>
-            </View>
-            <View style={{ flex: 1 }}>
-              <Text style={{ color: colors.text, fontWeight: '700', fontSize: 12.5 }}>Halaman {i + 1}</Text>
-            </View>
-            <Pressable onPress={() => showToast(`Hapus halaman ${i + 1}`)} style={{ padding: 8 }}><Ionicons name="trash-outline" size={16} color={colors.rose} /></Pressable>
-          </View>
-        ))}
       </ScrollView>
     </View>
   );
@@ -1975,13 +1842,16 @@ const WatermarkScreen = ({ colors, go, documents, currentDoc, showToast, params,
 };
 
 /* ============================================================
-   SCREEN: LOCK
+   SCREEN: LOCK (Fix F1, F2: PIN dari storage, no hint)
    ============================================================ */
-const LockScreen = ({ colors, onUnlock }) => {
+const LockScreen = ({ colors, storedPin, onUnlock }) => {
   const [pin, setPin] = useState('');
   const [error, setError] = useState('');
+  const [triedBio, setTriedBio] = useState(false);
 
   useEffect(() => {
+    if (triedBio) return;
+    setTriedBio(true);
     (async () => {
       try {
         const has = await LocalAuthentication.hasHardwareAsync();
@@ -1996,7 +1866,7 @@ const LockScreen = ({ colors, onUnlock }) => {
 
   useEffect(() => {
     if (pin.length === 4) {
-      if (pin === '1234') onUnlock();
+      if (pin === storedPin) onUnlock();
       else { setError('PIN salah'); setPin(''); haptic('error'); }
     }
   }, [pin]);
@@ -2027,7 +1897,6 @@ const LockScreen = ({ colors, onUnlock }) => {
           </Pressable>
         ))}
       </View>
-      <Text style={{ color: colors.textDim, fontSize: 10, marginTop: 20 }}>Hint: 1234</Text>
     </View>
   );
 };
@@ -2075,6 +1944,7 @@ const BottomDock = ({ colors, current, go }) => {
 const TAB_SCREENS = ['home', 'documents', 'folders', 'settings', 'pdf-tools'];
 
 const AppInner = () => {
+  const insets = useSafeAreaInsets();
   const [themeMode, setThemeMode] = useState('dark');
   const [stack, setStack] = useState([{ name: 'home', params: {} }]);
   const [documents, setDocuments] = useState([]);
@@ -2083,9 +1953,8 @@ const AppInner = () => {
   const [toast, setToast] = useState(null);
   const [appLock, setAppLock] = useState(false);
   const [unlocked, setUnlocked] = useState(false);
+  const [storedPin, setStoredPin] = useState('1234');
   const [qualityPreset, setQualityPreset] = useState('hd');
-  const [qualityFormat, setQualityFormat] = useState('pdf');
-  const [compressLevel, setCompressLevel] = useState('balanced');
   const [progress, setProgress] = useState({ visible: false, title: '', sub: '', value: 0 });
   const [hydrated, setHydrated] = useState(false);
 
@@ -2094,6 +1963,7 @@ const AppInner = () => {
 
   const toastTimer = useRef(null);
   const progressTimer = useRef(null);
+  const progressCancelled = useRef(false);
 
   const showToast = useCallback((msg) => {
     setToast(msg);
@@ -2101,32 +1971,48 @@ const AppInner = () => {
     toastTimer.current = setTimeout(() => setToast(null), 2200);
   }, []);
 
+  // Cleanup timers on unmount (Fix C3)
+  useEffect(() => {
+    return () => {
+      if (toastTimer.current) clearTimeout(toastTimer.current);
+      if (progressTimer.current) clearInterval(progressTimer.current);
+    };
+  }, []);
+
+  // Hydrate
   useEffect(() => {
     (async () => {
       try {
-        const [savedDocs, savedFolders, savedSettings, savedTheme] = await Promise.all([
-          Storage.getDocs(),
-          Storage.getFolders(),
-          Storage.getSettings(),
-          Storage.getTheme(),
+        const [savedDocs, savedFolders, savedSettings, savedTheme, savedPin] = await Promise.all([
+          Storage.getJSON(STORAGE_KEYS.DOCS),
+          Storage.getJSON(STORAGE_KEYS.FOLDERS),
+          Storage.getJSON(STORAGE_KEYS.SETTINGS),
+          Storage.get(STORAGE_KEYS.THEME),
+          Storage.get(STORAGE_KEYS.PIN),
         ]);
         if (savedDocs) setDocuments(savedDocs);
         if (savedFolders) setFolders(savedFolders);
         if (savedSettings) {
           if (savedSettings.appLock !== undefined) setAppLock(savedSettings.appLock);
           if (savedSettings.qualityPreset) setQualityPreset(savedSettings.qualityPreset);
-          if (savedSettings.compressLevel) setCompressLevel(savedSettings.compressLevel);
         }
         if (savedTheme) setThemeMode(savedTheme);
+        if (savedPin) setStoredPin(savedPin);
       } catch (e) {}
       finally { setHydrated(true); }
     })();
   }, []);
 
-  useEffect(() => { if (hydrated) Storage.saveDocs(documents); }, [documents, hydrated]);
-  useEffect(() => { if (hydrated) Storage.saveFolders(folders); }, [folders, hydrated]);
-  useEffect(() => { if (hydrated) Storage.saveSettings({ appLock, qualityPreset, compressLevel }); }, [appLock, qualityPreset, compressLevel, hydrated]);
-  useEffect(() => { if (hydrated) Storage.saveTheme(themeMode); }, [themeMode, hydrated]);
+  // Persist (Fix B2: alert kalau gagal)
+  useEffect(() => {
+    if (!hydrated) return;
+    Storage.setJSON(STORAGE_KEYS.DOCS, documents).then((ok) => {
+      if (!ok) console.warn('Gagal simpan documents');
+    });
+  }, [documents, hydrated]);
+  useEffect(() => { if (hydrated) Storage.setJSON(STORAGE_KEYS.FOLDERS, folders); }, [folders, hydrated]);
+  useEffect(() => { if (hydrated) Storage.setJSON(STORAGE_KEYS.SETTINGS, { appLock, qualityPreset }); }, [appLock, qualityPreset, hydrated]);
+  useEffect(() => { if (hydrated) Storage.set(STORAGE_KEYS.THEME, themeMode); }, [themeMode, hydrated]);
 
   const go = useCallback((name, params = {}) => {
     setStack((prev) => {
@@ -2148,45 +2034,55 @@ const AppInner = () => {
   }, [showToast]);
 
   const deleteDoc = useCallback((id) => {
-    Alert.alert('Hapus Dokumen', 'Dokumen ini akan dihapus permanen.', [
-      { text: 'Batal', style: 'cancel' },
-      { text: 'Hapus', style: 'destructive', onPress: () => {
-        setDocuments((prev) => prev.filter((d) => d.id !== id));
-        goBack();
-        showToast('Dokumen dihapus');
-      }},
-    ]);
-  }, [showToast, goBack]);
+    const doDelete = () => {
+      setDocuments((prev) => prev.filter((d) => d.id !== id));
+      go('documents');
+      showToast('Dokumen dihapus');
+    };
+    if (Platform.OS === 'web') {
+      if (typeof window !== 'undefined' && window.confirm('Hapus dokumen ini?')) doDelete();
+    } else {
+      Alert.alert('Hapus Dokumen', 'Dokumen ini akan dihapus permanen.', [
+        { text: 'Batal', style: 'cancel' },
+        { text: 'Hapus', style: 'destructive', onPress: doDelete },
+      ]);
+    }
+  }, [showToast, go]);
 
+  // Fix A8: delete page konsisten (pages & pageImages)
   const deletePage = useCallback((id, idx) => {
     setDocuments((prev) => prev.map((d) => {
       if (d.id !== id) return d;
       if (d.pages <= 1) { showToast('Minimal 1 halaman'); return d; }
-      return { ...d, pages: d.pages - 1 };
+      const newImages = (d.pageImages || []).filter((_, i) => i !== idx);
+      return { ...d, pages: d.pages - 1, pageImages: newImages };
     }));
+    showToast('Halaman dihapus');
   }, [showToast]);
 
+  // Fix A9: add page harus dari scan, buka scanner sebagai "add page mode"
   const addPage = useCallback((id) => {
-    setDocuments((prev) => prev.map((d) => (d.id === id ? { ...d, pages: d.pages + 1 } : d)));
-    showToast('Halaman ditambahkan');
-  }, [showToast]);
+    go('scanner', { appendToDocId: id });
+  }, [go]);
 
   const saveScannedDocument = useCallback(async (images) => {
+    if (progressCancelled.current) { progressCancelled.current = false; return; }
     try {
-      setProgress({ visible: true, title: 'Menyimpan dokumen…', sub: 'Generate PDF', value: 0 });
+      setProgress({ visible: true, title: 'Menyimpan dokumen…', sub: 'Generate PDF', value: 10 });
       const imageUris = images.map((img) => img.uri);
       const pdfResult = await imagesToPdf(imageUris, 'gandes_scan');
       const doc = {
         id: uid('doc'),
         name: `Scan ${new Date().toLocaleDateString('id-ID')} ${new Date().toLocaleTimeString('id-ID').slice(0, 5)}`,
-        folder: 'Catatan',
+        folderId: 'f3',
         pages: images.length,
         size: pdfResult.size,
         sizeStr: pdfResult.sizeStr,
         updatedAt: 'Baru saja',
+        createdAt: Date.now(),
         favorite: false,
         color: '#00f2fe',
-        ocr: 'Hasil OCR akan muncul di sini setelah diproses dengan AI Neural Vision.',
+        ocr: '',
         pdfUri: pdfResult.uri,
         pageImages: imageUris,
       };
@@ -2197,6 +2093,7 @@ const AppInner = () => {
       go('home');
       showToast(`✓ ${images.length} halaman disimpan (${pdfResult.sizeStr})`);
     } catch (e) {
+      console.error(e);
       setProgress({ visible: false, title: '', sub: '', value: 0 });
       showToast('Gagal menyimpan dokumen');
     }
@@ -2204,6 +2101,7 @@ const AppInner = () => {
 
   const onToolProgress = useCallback((state, doc) => {
     if (state === 'start') {
+      progressCancelled.current = false;
       setProgress({ visible: true, title: 'Memproses…', sub: 'Mohon tunggu', value: 0 });
       let v = 0;
       if (progressTimer.current) clearInterval(progressTimer.current);
@@ -2233,17 +2131,32 @@ const AppInner = () => {
     }
   }, []);
 
+  const cancelProgress = useCallback(() => {
+    progressCancelled.current = true;
+    if (progressTimer.current) { clearInterval(progressTimer.current); progressTimer.current = null; }
+    setProgress({ visible: false, title: '', sub: '', value: 0 });
+    showToast('Dibatalkan');
+  }, [showToast]);
+
+  const changePin = useCallback(async (pin) => {
+    setStoredPin(pin);
+    await Storage.set(STORAGE_KEYS.PIN, pin);
+  }, []);
+
   const currentDoc = useMemo(() => {
     const docId = currentScreen.params?.docId;
     if (!docId) return null;
     return documents.find((d) => d.id === docId) || null;
   }, [currentScreen, documents]);
 
+  const folderNameById = useCallback((id) => folders.find((f) => f.id === id)?.name || 'DOC', [folders]);
+
   if (!hydrated) {
+    // Fix E7: loading pakai theme aktif
     return (
-      <View style={{ flex: 1, backgroundColor: COLORS.dark.bg, alignItems: 'center', justifyContent: 'center' }}>
-        <ActivityIndicator color={COLORS.dark.cyan} size="large" />
-        <Text style={{ color: COLORS.dark.textMuted, fontSize: 12, marginTop: 12, fontWeight: '600' }}>Memuat Gandes Scanner…</Text>
+      <View style={{ flex: 1, backgroundColor: colors.bg, alignItems: 'center', justifyContent: 'center' }}>
+        <ActivityIndicator color={colors.cyan} size="large" />
+        <Text style={{ color: colors.textMuted, fontSize: 12, marginTop: 12, fontWeight: '600' }}>Memuat Gandes Scanner…</Text>
       </View>
     );
   }
@@ -2251,7 +2164,7 @@ const AppInner = () => {
   if (appLock && !unlocked) {
     return (
       <SafeAreaView style={{ flex: 1, backgroundColor: colors.bg }}>
-        <LockScreen colors={colors} onUnlock={() => setUnlocked(true)} />
+        <LockScreen colors={colors} storedPin={storedPin} onUnlock={() => setUnlocked(true)} />
       </SafeAreaView>
     );
   }
@@ -2259,50 +2172,57 @@ const AppInner = () => {
   const renderScreen = () => {
     const { name, params } = currentScreen;
     switch (name) {
-      case 'home': return <HomeScreen colors={colors} documents={documents} folders={folders} go={go} showToast={showToast} onToggleFav={toggleFavorite} />;
-      case 'documents': return <DocumentsScreen colors={colors} documents={documents} go={go} onToggleFav={toggleFavorite} filterFolder={params.folder} clearFilter={() => {}} showToast={showToast} />;
+      case 'home': return <HomeScreen colors={colors} documents={documents} folders={folders} go={go} showToast={showToast} onToggleFav={toggleFavorite} folderNameById={folderNameById} />;
+      case 'documents': return <DocumentsScreen colors={colors} documents={documents} folders={folders} go={go} onToggleFav={toggleFavorite} filterFolderId={params.folderId} />;
       case 'folders': return <FoldersScreen colors={colors} documents={documents} folders={folders} go={go} />;
-      case 'settings': return <SettingsScreen colors={colors} themeMode={themeMode} onToggleTheme={() => setThemeMode((m) => (m === 'dark' ? 'light' : 'dark'))} appLock={appLock} onToggleLock={(v) => { setAppLock(v); if (!v) setUnlocked(true); showToast(v ? '🔒 Kunci aktif' : 'Kunci nonaktif'); }} qualityPreset={qualityPreset} compressLevel={compressLevel} go={go} showToast={showToast} />;
-      case 'quality': return <QualityScreen colors={colors} qualityPreset={qualityPreset} setQualityPreset={setQualityPreset} qualityFormat={qualityFormat} setQualityFormat={setQualityFormat} go={go} showToast={showToast} />;
+      case 'settings': return <SettingsScreen colors={colors} themeMode={themeMode} onToggleTheme={() => setThemeMode((m) => (m === 'dark' ? 'light' : 'dark'))} appLock={appLock} onToggleLock={(v) => {
+        setAppLock(v);
+        if (!v) setUnlocked(true);
+        else setUnlocked(false);  // Fix D7
+        showToast(v ? '🔒 Kunci aktif' : 'Kunci nonaktif');
+      }} onChangePin={changePin} qualityPreset={qualityPreset} go={go} showToast={showToast} />;
+      case 'quality': return <QualityScreen colors={colors} qualityPreset={qualityPreset} setQualityPreset={setQualityPreset} go={go} showToast={showToast} />;
       case 'pdf-tools': return <PdfToolsScreen colors={colors} go={go} />;
-      case 'scanner': return <ScannerScreen colors={colors} go={go} qualityPreset={qualityPreset} capturedImages={capturedImages} setCapturedImages={setCapturedImages} showToast={showToast} initialParams={params} />;
-      case 'crop': return <CropScreen colors={colors} go={go} capturedImages={capturedImages} setCapturedImages={setCapturedImages} showToast={showToast} />;
+      case 'scanner': return <ScannerScreen colors={colors} go={go} capturedImages={capturedImages} setCapturedImages={setCapturedImages} showToast={showToast} initialParams={params} />;
       case 'enhance': return <EnhanceScreen colors={colors} go={go} capturedImages={capturedImages} setCapturedImages={setCapturedImages} qualityPreset={qualityPreset} showToast={showToast} onSaveDocument={saveScannedDocument} />;
       case 'preview': return <PreviewScreen colors={colors} go={go} currentDoc={currentDoc} showToast={showToast} />;
-      case 'detail': return <DetailScreen colors={colors} go={go} currentDoc={currentDoc} onToggleFav={toggleFavorite} onRename={renameDoc} onDelete={deleteDoc} onDeletePage={deletePage} onAddPage={addPage} showToast={showToast} />;
-      case 'ocr': return <OCRScreen colors={colors} go={go} currentDoc={currentDoc} showToast={showToast} />;
-      case 'annotation': return <AnnotationScreen colors={colors} go={go} currentDoc={currentDoc} showToast={showToast} />;
-      case 'signature': return <SignatureScreen colors={colors} go={go} currentDoc={currentDoc} showToast={showToast} />;
-      case 'merge': return <MergeScreen colors={colors} go={go} documents={documents} showToast={showToast} params={params} onComplete={onToolProgress} />;
-      case 'split': return <SplitScreen colors={colors} go={go} documents={documents} currentDoc={currentDoc} showToast={showToast} params={params} onComplete={onToolProgress} />;
+      case 'detail': return <DetailScreen colors={colors} go={go} currentDoc={currentDoc} folders={folders} onToggleFav={toggleFavorite} onRename={renameDoc} onDelete={deleteDoc} onDeletePage={deletePage} onAddPage={addPage} showToast={showToast} />;
+      case 'merge': return <MergeScreen colors={colors} go={go} documents={documents} folders={folders} showToast={showToast} params={params} onComplete={onToolProgress} />;
+      case 'split': return <SplitScreen colors={colors} go={go} documents={documents} currentDoc={currentDoc} folders={folders} showToast={showToast} params={params} onComplete={onToolProgress} />;
       case 'compress': return <CompressScreen colors={colors} go={go} documents={documents} currentDoc={currentDoc} showToast={showToast} params={params} onComplete={onToolProgress} />;
       case 'convert': return <ConvertScreen colors={colors} go={go} documents={documents} currentDoc={currentDoc} showToast={showToast} params={params} onComplete={onToolProgress} />;
-      case 'reorder': return <ReorderScreen colors={colors} go={go} documents={documents} currentDoc={currentDoc} showToast={showToast} params={params} />;
       case 'watermark': return <WatermarkScreen colors={colors} go={go} documents={documents} currentDoc={currentDoc} showToast={showToast} params={params} onComplete={onToolProgress} />;
-      default: return <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}><Text style={{ color: colors.text }}>Halaman tidak ditemukan</Text></View>;
+      default: return <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}><Text style={{ color: colors.text }}>Halaman tidak ditemukan: {name}</Text></View>;
     }
   };
 
   const showDock = TAB_SCREENS.includes(currentScreen.name);
 
   return (
-    <SafeAreaView style={{ flex: 1, backgroundColor: colors.bg }} edges={['top']}>
-      <StatusBar style={themeMode === 'dark' ? 'light' : 'dark'} />
+    <ThemeContext.Provider value={{ colors, mode: themeMode, setMode: setThemeMode }}>
       <View style={{ flex: 1, backgroundColor: colors.bg }}>
         {renderScreen()}
         {showDock ? <BottomDock colors={colors} current={currentScreen.name} go={switchTab} /> : null}
-        <Toast message={toast} colors={colors} />
-        <ProgressModal visible={progress.visible} title={progress.title} sub={progress.sub} progress={progress.value} colors={colors} />
+        <Toast message={toast} colors={colors} topInset={insets.top} />
+        <ProgressModal
+          visible={progress.visible}
+          title={progress.title}
+          sub={progress.sub}
+          progress={progress.value}
+          colors={colors}
+          onCancel={cancelProgress}
+        />
       </View>
-    </SafeAreaView>
+    </ThemeContext.Provider>
   );
 };
 
 const App = () => (
   <SafeAreaProvider>
-    <ThemeProvider mode="dark" setMode={() => {}}>
+    <SafeAreaView style={{ flex: 1, backgroundColor: '#080b11' }} edges={['top']}>
+      <StatusBar style="light" />
       <AppInner />
-    </ThemeProvider>
+    </SafeAreaView>
   </SafeAreaProvider>
 );
 
