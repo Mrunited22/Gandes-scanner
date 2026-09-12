@@ -2,7 +2,7 @@
   "expo": {
     "name": "Gandes Scanner",
     "slug": "gandes-scanner",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "orientation": "portrait",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
@@ -20,39 +20,38 @@
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.gandes.scanner",
-      "buildNumber": "1",
+      "buildNumber": "2",
       "infoPlist": {
         "NSCameraUsageDescription": "Gandes Scanner membutuhkan akses kamera untuk memindai dokumen Anda.",
         "NSPhotoLibraryUsageDescription": "Gandes Scanner membutuhkan akses galeri untuk mengimpor gambar dokumen.",
-        "NSPhotoLibraryAddUsageDescription": "Gandes Scanner membutuhkan izin menyimpan hasil scan ke galeri Anda.",
         "NSFaceIDUsageDescription": "Gandes Scanner menggunakan Face ID untuk mengamankan dokumen Anda.",
-        "NSDocumentsFolderUsageDescription": "Gandes Scanner membutuhkan akses folder dokumen untuk menyimpan hasil scan.",
-        "UIFileSharingEnabled": true,
-        "LSSupportsOpeningDocumentsInPlace": true
+        "UIFileSharingEnabled": false,
+        "LSSupportsOpeningDocumentsInPlace": false
       }
     },
 
     "android": {
       "package": "com.gandes.scanner",
-      "versionCode": 1,
+      "versionCode": 2,
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#080b11"
       },
       "permissions": [
         "CAMERA",
-        "READ_EXTERNAL_STORAGE",
-        "WRITE_EXTERNAL_STORAGE",
         "READ_MEDIA_IMAGES",
+        "READ_MEDIA_VISUAL_USER_SELECTED",
         "USE_BIOMETRIC",
-        "USE_FINGERPRINT",
-        "VIBRATE",
-        "WAKE_LOCK"
+        "USE_FINGERPRINT"
       ],
       "blockedPermissions": [
         "android.permission.RECORD_AUDIO",
         "android.permission.ACCESS_FINE_LOCATION",
-        "android.permission.ACCESS_COARSE_LOCATION"
+        "android.permission.ACCESS_COARSE_LOCATION",
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.WRITE_EXTERNAL_STORAGE",
+        "android.permission.READ_MEDIA_VIDEO",
+        "android.permission.READ_MEDIA_AUDIO"
       ],
       "softwareKeyboardLayoutMode": "pan"
     },
@@ -64,7 +63,7 @@
 
     "plugins": [
       [
-        "expo-camera",
+        "react-native-document-scanner-plugin",
         {
           "cameraPermission": "Gandes Scanner membutuhkan akses kamera untuk memindai dokumen Anda."
         }
@@ -73,15 +72,7 @@
         "expo-image-picker",
         {
           "photosPermission": "Gandes Scanner membutuhkan akses galeri untuk mengimpor gambar dokumen.",
-          "cameraPermission": "Gandes Scanner membutuhkan akses kamera untuk memindai dokumen Anda."
-        }
-      ],
-      [
-        "expo-media-library",
-        {
-          "photosPermission": "Gandes Scanner membutuhkan izin membaca galeri.",
-          "savePhotosPermission": "Gandes Scanner membutuhkan izin menyimpan hasil scan ke galeri.",
-          "isAccessMediaLocationEnabled": false
+          "cameraPermission": "Gandes Scanner tidak menggunakan kamera untuk impor."
         }
       ],
       [
